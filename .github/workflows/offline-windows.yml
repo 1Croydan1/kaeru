@@ -1,0 +1,88 @@
+# Verifies the documented offline-build path on a real Windows machine with
+# MSVC Build Tools and LLVM. Clones kaeru upstream rather than checking this
+# branch out, so the branch carries nothing but this file.
+name: offline build (windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ ci/offline-windows ]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: What the runner has
+        shell: pwsh
+        run: |
+          rustc -vV
+          cargo -V
+          git --version
+          if (Test-Path "C:\Program Files\LLVM\bin\libclang.dll") { "libclang: FOUND" } else { "libclang: MISSING" }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) { & $vswhere -latest -products * -property displayName }
+
+      # Git for Windows converts line endings by default. The vendor repo's
+      # .gitattributes is supposed to be what saves the checksums; leave the
+      # default on so that claim is actually under test.
+      - name: Leave core.autocrlf at the Windows default
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf true
+          "core.autocrlf = " + (git config --global --get core.autocrlf)
+
+      - name: Clone kaeru
+        shell: pwsh
+        run: |
+          git clone https://github.com/LamantinAI/kaeru.git kaeru
+          cd kaeru
+          git log --oneline -1
+
+      - name: fetch-vendor.sh, from Git Bash, network on
+        shell: bash
+        working-directory: kaeru
+        run: ./contrib/offline/fetch-vendor.sh
+
+      - name: The config it produced
+        shell: bash
+        working-directory: kaeru
+        run: cat .cargo/config.toml
+
+      # No --offline flag: the [net] stanza in the fetched config is what has
+      # to hold. Empty CARGO_HOME so anything fetched would show up.
+      - name: Build
+        shell: pwsh
+        working-directory: kaeru
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          $env:CARGO_HOME = "$env:RUNNER_TEMP\fresh-cargo-home"
+          New-Item -ItemType Directory -Force -Path $env:CARGO_HOME | Out-Null
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          cargo build --release -p kaeru-mcp
+          $sw.Stop()
+          "BUILD TIME: $($sw.Elapsed)"
+
+      - name: Nothing came from the network
+        shell: pwsh
+        run: |
+          $ch = "$env:RUNNER_TEMP\fresh-cargo-home"
+          "CARGO_HOME contents:"
+          Get-ChildItem $ch -Force | ForEach-Object { "  " + $_.Name }
+          $reg = Join-Path $ch 'registry'
+          if (Test-Path $reg) {
+            "registry entries: " + (Get-ChildItem $reg -Force -Recurse | Measure-Object).Count
+          } else { "registry: absent" }
+          if (Test-Path (Join-Path $ch 'git')) { "git cache: PRESENT" } else { "git cache: absent" }
+
+      - name: The binary runs
+        shell: pwsh
+        working-directory: kaeru
+        run: |
+          Get-Item .\target\release\kaeru-mcp.exe | Format-List Name, Length
+          $p = Start-Process -FilePath .\target\release\kaeru-mcp.exe -PassThru -NoNewWindow `
+                 -RedirectStandardOutput daemon-out.log -RedirectStandardError daemon-err.log
+          Start-Sleep -Seconds 8
+          Stop-Process -Id $p.Id -Force
+          Get-Content daemon-out.log, daemon-err.log -ErrorAction SilentlyContinue
