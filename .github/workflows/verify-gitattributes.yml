@@ -1,0 +1,45 @@
+# A/B on one Windows runner, with core.autocrlf left at the Windows default:
+# upstream main (no .gitattributes) against the fix branch. Same machine, same
+# git config, one variable.
+name: verify gitattributes fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ ci/verify-gitattributes ]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: BEFORE — upstream main, expected to fail
+        id: before
+        continue-on-error: true
+        shell: bash
+        run: |
+          git config --global core.autocrlf true
+          git clone --quiet https://github.com/LamantinAI/kaeru.git before
+          file before/Cargo.lock
+          cd before && ./contrib/offline/fetch-vendor.sh
+
+      - name: AFTER — fix branch, expected to succeed
+        id: after
+        continue-on-error: true
+        shell: bash
+        run: |
+          git config --global core.autocrlf true
+          git clone --quiet -b fix/gitattributes-crlf \
+            https://github.com/1Croydan1/kaeru.git after
+          file after/Cargo.lock
+          cd after && ./contrib/offline/fetch-vendor.sh
+
+      - name: Verdict
+        shell: pwsh
+        run: |
+          "BEFORE (upstream main): ${{ steps.before.outcome }}"
+          "AFTER  (fix branch):    ${{ steps.after.outcome }}"
+          if ("${{ steps.before.outcome }}" -ne "failure" -or "${{ steps.after.outcome }}" -ne "success") {
+            throw "A/B did not come out as expected"
+          }
+          "fix confirmed"
