@@ -156,6 +156,25 @@ impl CloudClient {
         Ok((code, text))
     }
 
+    /// `DELETE /api/v1/edges` — retract an edge between two shared nodes.
+    ///
+    /// The triple goes in the body: a path segment cannot hold two UUIDs and
+    /// an edge type without inventing an encoding. Idempotent on the far side.
+    pub async fn delete_edge(&self, body: &Value) -> Result<(u16, String), String> {
+        let url = format!("{}/api/v1/edges", self.base_url);
+        let resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let code = resp.status().as_u16();
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        Ok((code, text))
+    }
+
     /// `GET /api/v1/initiatives/{name}/nodes` — list shared briefs.
     /// `DELETE /api/v1/nodes/{id}` — retract a node from the cloud.
     ///

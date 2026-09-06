@@ -11,6 +11,7 @@
 //! pre-share secret guard. Both gates fail *safe* — a refusal returns an
 //! explanatory message, never a silent push.
 
+use std::collections::HashSet;
 use std::str::FromStr;
 
 use kaeru_core::{EdgeType, Error, Layer, NodeType, SharePolicy, Store, Tier, Visibility};
@@ -132,7 +133,18 @@ pub async fn push_to_cloud(
     // Gate 2 — pre-share secret guard over name + body. Use the strict
     // scanner: sharing leaves the machine, so the gate must be at least as
     // strict as the local markdown export (which uses `scan_public`).
-    let scan_target = format!("{}\n{}", full.name, full.body.clone().unwrap_or_default());
+    // `properties` joined the payload in #85, so it joins the guard's remit in
+    // the same change — a URL or a status registry is content leaving the
+    // machine like any other. `tags` are still unscanned; see AGENTS.md.
+    let scan_target = format!(
+        "{}\n{}\n{}",
+        full.name,
+        full.body.clone().unwrap_or_default(),
+        full.properties
+            .as_ref()
+            .map(|p| p.to_string())
+            .unwrap_or_default()
+    );
     let hits = kaeru_core::guard::scan_public(&scan_target);
     if !hits.is_empty() && !force {
         let shown: Vec<String> = hits.iter().map(format_hit).collect();
@@ -152,6 +164,10 @@ pub async fn push_to_cloud(
         "tags": full.tags,
         "initiative": initiative,
         "layer": full.layer,
+        // A `reference`'s URL and a `board`'s status registry live here. The
+        // payload omitted the field entirely, so of 78 references in a live
+        // cloud not one carried the link it was cited for (#85).
+        "properties": full.properties,
     });
     let (code, resp) = cloud
         .post_node(&body)
@@ -168,31 +184,177 @@ pub async fn push_to_cloud(
     // still local is skipped — it gets pushed when that endpoint is shared.
     let edges = kaeru_core::edges_of(store, &full.id).map_err(to_mcp)?;
     let mut edges_pushed = 0;
+    let mut held_back = 0;
+    let mut rejected: Vec<String> = Vec::new();
     for (src, dst, edge_type, weight) in &edges {
         let other = if *src == full.id { dst } else { src };
         if kaeru_core::get_visibility(store, other).map_err(to_mcp)? != Visibility::Shared {
+            held_back += 1;
             continue;
         }
         let ebody =
             serde_json::json!({ "src": src, "dst": dst, "edge_type": edge_type, "weight": weight });
-        let (ecode, _) = cloud
+        let (ecode, eresp) = cloud
             .post_edge(&ebody)
             .await
             .map_err(|e| McpError::internal_error(format!("cloud POST edge failed: {e}"), None))?;
         if (200..300).contains(&ecode) {
             edges_pushed += 1;
+        } else {
+            // A non-2xx used to just skip the increment, so an edge the cloud
+            // refused looked exactly like an edge that was never eligible.
+            rejected.push(format!("{edge_type} ({ecode}): {}", first_line(&eresp)));
         }
     }
 
-    let edge_note = if edges_pushed > 0 {
-        format!(" (+{edges_pushed} edge(s))")
-    } else {
-        String::new()
-    };
     Ok(format!(
-        "shared `{}` → cloud (id {}){edge_note}",
-        full.name, full.id
+        "shared `{}` → cloud (id {}){}",
+        full.name,
+        full.id,
+        edge_outcome(edges_pushed, held_back, &rejected)
     ))
+}
+
+/// The edge half of a share result, always stated.
+///
+/// It used to be printed only when at least one edge went up, so a share that
+/// carried the node's whole neighbourhood and a share that carried a bare node
+/// produced byte-identical lines — and since `visibility=shared` at capture
+/// runs when the node has no edges at all, the silent case was the common one
+/// (#85).
+fn edge_outcome(pushed: usize, held_back: usize, rejected: &[String]) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("+{pushed} edge(s)"));
+    if held_back > 0 {
+        parts.push(format!(
+            "{held_back} held back, other endpoint not shared — re-run `share` on this node once              it is"
+        ));
+    }
+    if !rejected.is_empty() {
+        parts.push(format!(
+            "{} REJECTED: {}",
+            rejected.len(),
+            rejected.join("; ")
+        ));
+    }
+    format!(" ({})", parts.join(" · "))
+}
+
+/// First line of a response body, capped — enough to see why a push failed
+/// without pasting a page of HTML into a tool result.
+fn first_line(body: &str) -> String {
+    let line = body.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 120 {
+        format!("{}…", line.chars().take(120).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
+/// What happened to an edge locally, so the cloud can be told the same thing.
+pub enum EdgeChange {
+    /// Created or reweighted — the cloud's `POST /edges` is an upsert.
+    Upsert(f64),
+    /// Retracted — `DELETE /edges`.
+    Retract,
+}
+
+/// Mirrors a local edge change to the cloud when **both** endpoints are
+/// already shared, appending what happened to `msg`.
+///
+/// `link`, `unlink` and `reweight` had no path to HTTP at all, so the graph
+/// the cloud held was frozen at the moment of each node's share. Since
+/// `visibility=shared` at capture runs when a node has zero edges, that meant
+/// a "capture and push in one call" node structurally never carried an edge,
+/// and an `unlink` was undone by the next `pull` (#85).
+///
+/// Silent when either endpoint is local: that edge is not the cloud's to hold
+/// yet, and it goes up on its own when the other endpoint is shared. Silent
+/// too when no cloud is configured — this is a local-first product and a
+/// graph edit must not start failing because a daemon has no cloud.
+#[allow(clippy::too_many_arguments)]
+pub async fn propagate_edge(
+    store: &Store,
+    clouds: &CloudRegistry,
+    cloud_name: Option<&str>,
+    src: &str,
+    dst: &str,
+    edge_type: EdgeType,
+    change: EdgeChange,
+    initiative: Option<&str>,
+    msg: &mut String,
+) -> Result<(), McpError> {
+    // Everything cheap and local first: an edge with a local endpoint is not
+    // the cloud's to hold, and there is nothing to resolve for it.
+    let Some(init) = initiative else {
+        return Ok(());
+    };
+    let both_shared = kaeru_core::get_visibility(store, &src.to_string()).map_err(to_mcp)?
+        == Visibility::Shared
+        && kaeru_core::get_visibility(store, &dst.to_string()).map_err(to_mcp)?
+            == Visibility::Shared;
+    if !both_shared || clouds.is_empty() {
+        return Ok(());
+    }
+
+    // `resolve` is the single funnel, and it refuses to guess between several
+    // configured clouds. Here that must not fail the call: the local edit has
+    // already happened and is the point of the verb. So the ambiguity is
+    // reported instead — silence would leave local and cloud differing with
+    // nothing to say it.
+    let cloud = match clouds.resolve(cloud_name) {
+        Ok(c) => c,
+        Err(why) => {
+            msg.push_str(&format!(
+                "\n↳ not mirrored: {why} — pass `cloud=<name>` to send this edge"
+            ));
+            return Ok(());
+        }
+    };
+
+    // The nodes passed the gates when they were shared, but the initiative may
+    // have been closed since. Nothing more leaves an initiative that has been
+    // set back to `private`.
+    let pol = kaeru_core::get_share_policy(store, init).map_err(to_mcp)?;
+    if !pol.permits_share()
+        || !kaeru_core::permits_cloud(store, init, cloud.name()).map_err(to_mcp)?
+    {
+        msg.push_str(&format!(
+            "\n(both endpoints are shared, but `{init}` no longer permits sharing to `{}` — the \
+             cloud still holds the old edge)",
+            cloud.name()
+        ));
+        return Ok(());
+    }
+
+    let (code, resp) = match change {
+        EdgeChange::Upsert(weight) => {
+            let body = serde_json::json!({
+                "src": src, "dst": dst, "edge_type": edge_type.as_str(), "weight": weight
+            });
+            cloud.post_edge(&body).await
+        }
+        EdgeChange::Retract => {
+            let body = serde_json::json!({
+                "src": src, "dst": dst, "edge_type": edge_type.as_str()
+            });
+            cloud.delete_edge(&body).await
+        }
+    }
+    .map_err(|e| McpError::internal_error(format!("cloud edge call failed: {e}"), None))?;
+
+    if (200..300).contains(&code) {
+        msg.push_str(&format!("\n↳ mirrored to cloud `{}`", cloud.name()));
+    } else {
+        // Said out loud rather than swallowed: local and cloud now disagree,
+        // and the agent is the only one in a position to retry.
+        msg.push_str(&format!(
+            "\n↳ NOT mirrored to cloud `{}` ({code}): {} — local and cloud now differ",
+            cloud.name(),
+            first_line(&resp)
+        ));
+    }
+    Ok(())
 }
 
 /// Initiative names out of a cloud's `GET /api/v1/initiatives` payload.
@@ -523,6 +685,11 @@ pub async fn pull(
 
     let node_type = NodeType::from_str(node_type_s).map_err(to_mcp)?;
     let tier = Tier::from_str(tier_s).map_err(to_mcp)?;
+    // A cloud too old to send the field sends nothing, and `None` tells
+    // `upsert_node` to keep whatever is local rather than clear it. That
+    // ordering matters: the destructive case was pulling a `cite` to refresh
+    // it and losing the URL it was cited for (#85).
+    let properties = v.get("properties").filter(|p| !p.is_null());
 
     kaeru_core::upsert_node(
         store,
@@ -535,18 +702,19 @@ pub async fn pull(
         Some(initiative),
         Visibility::Shared,
         layer,
+        properties,
     )
     .map_err(to_mcp)?;
 
     // Rebuild structure: recreate every cloud edge of this initiative whose
     // BOTH endpoints already exist locally. Pulling more nodes fills in more
     // edges over time; an edge to a not-yet-pulled node is simply skipped.
-    let edges_recreated = recreate_local_edges(store, cloud, initiative).await?;
-    let edge_note = if edges_recreated > 0 {
-        format!(" (+{edges_recreated} edge(s) linked)")
-    } else {
-        String::new()
-    };
+    let rebuilt = recreate_local_edges(store, cloud, initiative).await?;
+    let mut edge_parts = vec![format!("+{} edge(s) linked", rebuilt.linked)];
+    if rebuilt.kept > 0 {
+        edge_parts.push(format!("{} already local, left as they are", rebuilt.kept));
+    }
+    let edge_note = format!(" ({})", edge_parts.join(" · "));
 
     Ok(text(&format!(
         "pulled `{name}` from cloud into local initiative `{initiative}` (id {id}){edge_note}"
@@ -560,20 +728,34 @@ async fn recreate_local_edges(
     store: &Store,
     cloud: &CloudClient,
     initiative: &str,
-) -> Result<usize, McpError> {
+) -> Result<EdgeRebuild, McpError> {
     let (code, resp) = cloud
         .list_edges(initiative)
         .await
         .map_err(|e| McpError::internal_error(format!("cloud list edges failed: {e}"), None))?;
     if !(200..300).contains(&code) {
-        return Ok(0);
+        return Ok(EdgeRebuild { linked: 0, kept: 0 });
     }
     let items: Vec<Value> = serde_json::from_str::<Value>(&resp)
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
 
+    // What the vault already holds, read once. A cloud edge that matches one
+    // of these is left exactly as it is: `recreate_local_edges` used to call
+    // `link_with_weight` unconditionally, which meant every pull reverted a
+    // local `reweight` (a reweight never reaches the cloud, so the cloud's
+    // value is by definition the stale one) and re-linked what `unlink` had
+    // just retracted (#85).
+    let local_edges: HashSet<(String, String, String)> =
+        kaeru_core::edges_in_initiative(store, initiative)
+            .map_err(to_mcp)?
+            .into_iter()
+            .map(|(src, dst, et, _)| (src, dst, et))
+            .collect();
+
     let mut linked = 0;
+    let mut kept = 0;
     for it in &items {
         let src = it.get("src").and_then(|x| x.as_str()).unwrap_or("");
         let dst = it.get("dst").and_then(|x| x.as_str()).unwrap_or("");
@@ -597,13 +779,25 @@ async fn recreate_local_edges(
         let Ok(edge) = et.parse::<EdgeType>() else {
             continue;
         };
+        if local_edges.contains(&(src.to_string(), dst.to_string(), et.to_string())) {
+            kept += 1;
+            continue;
+        }
         with_initiative(store, Some(initiative), || {
             kaeru_core::link_with_weight(store, &src.to_string(), &dst.to_string(), edge, weight)
                 .map_err(to_mcp)
         })?;
         linked += 1;
     }
-    Ok(linked)
+    Ok(EdgeRebuild { linked, kept })
+}
+
+/// What one pull's edge rebuild did.
+struct EdgeRebuild {
+    /// Edges the cloud held that the vault did not, now created locally.
+    linked: usize,
+    /// Edges already present locally, left untouched — weight and all.
+    kept: usize,
 }
 
 /// Creates a soft link from a local node to a cloud node by id — a reference

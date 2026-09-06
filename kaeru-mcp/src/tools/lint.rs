@@ -6,6 +6,11 @@ use rmcp::model::CallToolResult;
 
 use crate::utils::{brief_suffix, text, to_mcp, with_initiative};
 
+/// How many shared-node edges the reflection lists before summarising the
+/// rest. A well-connected shared initiative has hundreds, and the point of
+/// the section is the condition, not the enumeration.
+const SHARED_EDGE_CAP: usize = 10;
+
 /// Appends one labelled section (title, how-to, then the ids with names) to
 /// the reflection output. No-op when `ids` is empty.
 fn push_section(out: &mut String, store: &Store, title: &str, how: &str, ids: &[String]) {
@@ -57,6 +62,7 @@ pub fn reflect(store: &Store, initiative: Option<&str>) -> Result<CallToolResult
             + r.stale_chains.len()
             + r.cortex_candidates.len()
             + r.archivable.len()
+            + r.shared_edges.len()
             + r.shared.len()
             + r.overdue_tasks.len()
             + r.contested_claims.len()
@@ -145,6 +151,34 @@ pub fn reflect(store: &Store, initiative: Option<&str>) -> Result<CallToolResult
             "ASK THE USER before any re-share or edge rebalance — never touch the cloud yourself",
             &r.shared,
         );
+        // The section that used to advise about "edge rebalance" while
+        // computing nothing about edges (#85). It still cannot be a
+        // diagnosis — only the cloud knows what the cloud holds — so it says
+        // what it is: the set that can be stale, and the one call that
+        // reconciles it.
+        if !r.shared_edges.is_empty() {
+            out.push_str(&format!(
+                "\nedges between shared nodes ({}) — the cloud may not hold these. Graph edits \
+                 propagate as of 0.7.2; anything linked before that, or refused by the cloud, is \
+                 still local only. `share <either endpoint>` re-pushes the node and its edges:\n",
+                r.shared_edges.len()
+            ));
+            for (src, dst, edge_type) in r.shared_edges.iter().take(SHARED_EDGE_CAP) {
+                out.push_str(&format!(
+                    "  - {}{} -[{edge_type}]-> {}{}\n",
+                    src,
+                    brief_suffix(store, src),
+                    dst,
+                    brief_suffix(store, dst)
+                ));
+            }
+            if r.shared_edges.len() > SHARED_EDGE_CAP {
+                out.push_str(&format!(
+                    "  … and {} more\n",
+                    r.shared_edges.len() - SHARED_EDGE_CAP
+                ));
+            }
+        }
         out.push_str(
             "\n↳ work it: link/relink and `reweight` where structure shifted, `rechain` stale \
              trails, promote settled facts into cortex. The last two sections are candidates to \

@@ -110,8 +110,18 @@ async fn share_node(
         None => return Err(format!("node `{id}` not found at NOW")),
     };
 
-    // Gate 2 — strict pre-share secret guard over name + body.
-    let scan_target = format!("{}\n{}", full.name, full.body.clone().unwrap_or_default());
+    // Gate 2 — strict pre-share secret guard over name + body + properties.
+    // Properties joined the payload in #85, so they join the guard's remit in
+    // the same change; the mcp adapter's copy of this path says the same.
+    let scan_target = format!(
+        "{}\n{}\n{}",
+        full.name,
+        full.body.clone().unwrap_or_default(),
+        full.properties
+            .as_ref()
+            .map(|p| p.to_string())
+            .unwrap_or_default()
+    );
     let hits = guard::scan_public(&scan_target);
     if !hits.is_empty() && !force {
         let shown: Vec<String> = hits.iter().map(format_hit).collect();
@@ -132,6 +142,8 @@ async fn share_node(
         "tags": full.tags,
         "initiative": initiative,
         "layer": full.layer,
+        // A `reference`'s URL, a `board`'s status registry (#85).
+        "properties": full.properties,
     });
     let (code, resp) = client
         .post_node(&body)

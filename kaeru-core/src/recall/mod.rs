@@ -5,6 +5,7 @@
 //! parsing helpers, which several submodules build on.
 
 use cozo::DataValue;
+use serde_json::Value as JsonValue;
 
 use crate::graph::NodeId;
 use crate::graph::temporal::validity_seconds;
@@ -89,6 +90,13 @@ pub struct NodeFull {
     /// Memory layer (`core`/`hot`/`warm`/`cold`/`frozen`) — carried through
     /// share/pull so a node keeps its recall priority across the cloud.
     pub layer: String,
+    /// The node's `properties` JSON, verbatim.
+    ///
+    /// Not decoration: a `reference` keeps its URL here and a `board` keeps
+    /// its status registry, so a struct documented as "every field a sharing
+    /// path needs" that omitted this was pushing citations without the link
+    /// they exist for (#85).
+    pub properties: Option<JsonValue>,
 }
 
 /// Parses a Cozo result row of `[id, type, name, body, …, validity]` into a

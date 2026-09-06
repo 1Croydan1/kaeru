@@ -262,6 +262,24 @@ where an initiative may go is the only thing that catches that.
 - **A node must name an initiative.** A POST without one is refused: the
   substrate accepts it, and then nothing that walks initiatives can ever see
   it again — including `cloud_recall`.
+- **`DELETE /api/v1/edges` retracts one edge**, by `src`/`dst`/`edge_type` in
+  the body (a path segment cannot hold two UUIDs and a type). Bi-temporal and
+  idempotent, like the node retraction. Without it a cloud edge could only die
+  by retracting an endpoint node, so `unlink` had nowhere to send itself and
+  the next `pull` restored the edge — a retraction any pull can undo is not a
+  retraction.
+- **`link` / `unlink` / `reweight` mirror to the cloud** when BOTH endpoints
+  are already shared. The local write happens first and never depends on the
+  network; the result line says whether the mirror succeeded. With several
+  clouds configured and none named the edit still lands and the result says
+  the edge was not mirrored — an ambiguity must not fail a local graph edit.
+- **`properties` travel both ways**, and an omitted `properties` field means
+  "nothing to say", never "clear it". `upsert_node` carries the stored value
+  forward when given `None`; only an explicit null clears it.
+- **`pull` does not touch an edge the vault already has.** It creates what is
+  missing and leaves the rest — including its weight — alone. A `reweight`
+  never reaches the cloud unless both endpoints are shared, so the cloud's
+  weight is by definition the one more likely to be stale.
 - **Whole-second caveat.** A node retracted inside the same second it was
   ingested carries an assert and a retract that cannot be ordered, and may
   still read until the next write. Retrying a second later settles it.
@@ -271,18 +289,23 @@ where an initiative may go is the only thing that catches that.
 These are deliberate gaps in the local/cloud split, not bugs — documented so
 they are not mistaken for safety guarantees:
 
-- **The pre-share secret guard scans `name` + `body` only.** `tags` and
-  `properties` are pushed/ingested but NOT scanned, and PII (emails, phones)
-  is not flagged at all. A secret placed in a tag or in properties will leak
-  on share. Treat the guard as a backstop for the common case, not a
-  complete DLP boundary. Widening coverage (tags/properties, PII rules) is
-  future work — see `kaeru-core/src/guard.rs`.
-- **There is no un-share / retract path.** Once a node is `shared` (pushed to
-  the cloud), nothing flips it back to `local` or deletes it from the cloud;
-  there is no `DELETE` on the cloud API and no `unshare` verb. A soft link to
-  a removed cloud node can dangle (shows "unresolved" via `cloud_links`).
-  Re-sharing/pulling the same id upserts in place (last-writer-wins, no
-  version reconciliation).
+- **The pre-share secret guard scans `name` + `body` + `properties`.** `tags`
+  are pushed/ingested but NOT scanned, and PII (emails, phones) is not flagged
+  at all. A secret placed in a tag will leak on share. Treat the guard as a
+  backstop for the common case, not a complete DLP boundary. Widening coverage
+  (tags, PII rules) is future work — see `kaeru-core/src/guard.rs`.
+  `properties` joined the guard's remit in #85, in the same change that first
+  put them on the wire.
+- **`DELETE` exists for nodes and for edges; there is no version
+  reconciliation.** Re-sharing or pulling the same id upserts in place —
+  last writer wins. A soft link to a retracted cloud node can dangle (shows
+  "unresolved" via `cloud_links`).
+- **The cloud's copy of the graph can lag, and only the cloud knows by how
+  much.** Graph edits propagate when both endpoints are shared, but an edge
+  linked before #85, or one the cloud refused, is local only. `reflect` lists
+  edges between shared nodes as the candidate set; confirming it needs a call
+  the local read side does not make. `share` on either endpoint re-pushes the
+  node and its edges.
 
 ## Known Bugs (To Work On)
 

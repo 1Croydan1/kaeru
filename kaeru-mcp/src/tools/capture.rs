@@ -11,8 +11,8 @@ use kaeru_core::{EdgeType, EpisodeKind, Significance, Store};
 use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 
-use crate::cloud_client::CloudClient;
-use crate::tools::cloud::push_to_cloud;
+use crate::cloud_client::{CloudClient, CloudRegistry};
+use crate::tools::cloud::{EdgeChange, propagate_edge, push_to_cloud};
 use crate::utils::{
     capture_result, markup_strip_note, parse_layer, parse_wants_shared, resolve_link_endpoint,
     text, to_mcp, with_initiative,
@@ -107,15 +107,23 @@ pub async fn jot(
     Ok(text(&msg))
 }
 
-pub fn link(
+/// The three graph verbs are `async` and cloud-aware for one reason: an edge
+/// between two shared nodes belongs to the cloud as much as the nodes do, and
+/// none of them had any path to HTTP — so the cloud's copy of the graph was
+/// frozen at the moment each node was shared (#85). The local write always
+/// happens first and is never conditional on the network.
+#[allow(clippy::too_many_arguments)]
+pub async fn link(
     store: &Store,
+    clouds: &CloudRegistry,
+    cloud_name: Option<&str>,
     from: &str,
     to: &str,
     edge_type_str: &str,
     weight: f64,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    with_initiative(store, initiative, || {
+    let (edge, from_id, to_id) = with_initiative(store, initiative, || {
         let edge: EdgeType = edge_type_str.parse().map_err(to_mcp)?;
         let from_id = resolve_link_endpoint(store, from)?;
         let to_id = resolve_link_endpoint(store, to)?;
@@ -123,54 +131,99 @@ pub fn link(
         // shortest-paths route on, so there is no neutral default to fall back
         // to. `link_with_weight` clamps to 0..1.
         kaeru_core::link_with_weight(store, &from_id, &to_id, edge, weight).map_err(to_mcp)?;
-        Ok(text(&format!(
-            "linked: {from} -[{}]-> {to} (weight {weight:.2})",
-            edge.as_str()
-        )))
-    })
+        Ok((edge, from_id, to_id))
+    })?;
+    let mut msg = format!(
+        "linked: {from} -[{}]-> {to} (weight {weight:.2})",
+        edge.as_str()
+    );
+    propagate_edge(
+        store,
+        clouds,
+        cloud_name,
+        &from_id,
+        &to_id,
+        edge,
+        EdgeChange::Upsert(weight.clamp(0.0, 1.0)),
+        initiative,
+        &mut msg,
+    )
+    .await?;
+    Ok(text(&msg))
 }
 
-pub fn unlink(
+#[allow(clippy::too_many_arguments)]
+pub async fn unlink(
     store: &Store,
+    clouds: &CloudRegistry,
+    cloud_name: Option<&str>,
     from: &str,
     to: &str,
     edge_type_str: &str,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    with_initiative(store, initiative, || {
+    let (edge, from_id, to_id) = with_initiative(store, initiative, || {
         let edge: EdgeType = edge_type_str.parse().map_err(to_mcp)?;
         let from_id = resolve_link_endpoint(store, from)?;
         let to_id = resolve_link_endpoint(store, to)?;
         kaeru_core::unlink(store, &from_id, &to_id, edge).map_err(to_mcp)?;
-        Ok(text(&format!(
-            "unlinked: {from} -[{}]-> {to}",
-            edge.as_str()
-        )))
-    })
+        Ok((edge, from_id, to_id))
+    })?;
+    let mut msg = format!("unlinked: {from} -[{}]-> {to}", edge.as_str());
+    propagate_edge(
+        store,
+        clouds,
+        cloud_name,
+        &from_id,
+        &to_id,
+        edge,
+        EdgeChange::Retract,
+        initiative,
+        &mut msg,
+    )
+    .await?;
+    Ok(text(&msg))
 }
 
 /// Sets the connection strength (`weight`, 0..1) of an existing edge —
 /// in-place, no new version. Stronger edges make shorter knowledge-chain
 /// paths. Use to tune which links matter after the fact.
-pub fn reweight(
+#[allow(clippy::too_many_arguments)]
+pub async fn reweight(
     store: &Store,
+    clouds: &CloudRegistry,
+    cloud_name: Option<&str>,
     from: &str,
     to: &str,
     edge_type_str: &str,
     weight: f64,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    with_initiative(store, initiative, || {
+    let (edge, from_id, to_id) = with_initiative(store, initiative, || {
         let edge: EdgeType = edge_type_str.parse().map_err(to_mcp)?;
         let from_id = resolve_link_endpoint(store, from)?;
         let to_id = resolve_link_endpoint(store, to)?;
         kaeru_core::set_edge_weight(store, &from_id, &to_id, edge, weight).map_err(to_mcp)?;
-        Ok(text(&format!(
-            "reweighted: {from} -[{}]-> {to} = {:.2}",
-            edge.as_str(),
-            weight.clamp(0.0, 1.0)
-        )))
-    })
+        Ok((edge, from_id, to_id))
+    })?;
+    let mut msg = format!(
+        "reweighted: {from} -[{}]-> {to} = {:.2}",
+        edge.as_str(),
+        weight.clamp(0.0, 1.0)
+    );
+    propagate_edge(
+        store,
+        clouds,
+        cloud_name,
+        &from_id,
+        &to_id,
+        edge,
+        EdgeChange::Upsert(weight.clamp(0.0, 1.0)),
+        initiative,
+        &mut msg,
+    )
+    .await?;
+    Ok(text(&msg))
 }
 
 pub async fn cite(
@@ -203,7 +256,7 @@ pub async fn cite(
 mod tests {
     use kaeru_core::{EpisodeKind, Significance, Store};
 
-    use super::{episode, link};
+    use super::{CloudRegistry, episode, link};
 
     /// Seeds a node under `initiative` and returns its id.
     fn seed(store: &Store, initiative: &str, name: &str) -> String {
@@ -274,30 +327,58 @@ mod tests {
             .len()
     }
 
+    /// A registry with nothing in it — the local-only daemon, and what every
+    /// test here runs against: no cloud means `propagate_edge` returns before
+    /// it touches the network.
+    fn no_clouds() -> CloudRegistry {
+        CloudRegistry::new(std::collections::HashMap::new(), None)
+    }
+
     /// An edge can join nodes living under different initiatives: scoped to
     /// `a`, the source resolves in-scope while the destination (only in `b`)
     /// resolves through the cross-initiative fallback. This is the friction
     /// that used to force dropping the initiative scope to link at all.
-    #[test]
-    fn link_joins_nodes_across_initiatives() {
+    #[tokio::test]
+    async fn link_joins_nodes_across_initiatives() {
         let store = Store::open_in_memory().expect("open");
         let a = seed(&store, "a", "node-a");
         let b = seed(&store, "b", "node-b");
 
-        link(&store, "node-a", "node-b", "refers_to", 0.5, Some("a"))
-            .expect("cross-initiative link resolves");
+        link(
+            &store,
+            &no_clouds(),
+            None,
+            "node-a",
+            "node-b",
+            "refers_to",
+            0.5,
+            Some("a"),
+        )
+        .await
+        .expect("cross-initiative link resolves");
 
         assert_eq!(edge_count(&store, &a, &b), 1, "edge was created");
     }
 
     /// Endpoints may be raw UUIDv7 ids, not just names.
-    #[test]
-    fn link_accepts_ids() {
+    #[tokio::test]
+    async fn link_accepts_ids() {
         let store = Store::open_in_memory().expect("open");
         let a = seed(&store, "x", "src");
         let b = seed(&store, "x", "dst");
 
-        link(&store, &a, &b, "refers_to", 0.5, Some("x")).expect("link by id resolves");
+        link(
+            &store,
+            &no_clouds(),
+            None,
+            &a,
+            &b,
+            "refers_to",
+            0.5,
+            Some("x"),
+        )
+        .await
+        .expect("link by id resolves");
 
         assert_eq!(edge_count(&store, &a, &b), 1, "edge was created from ids");
     }

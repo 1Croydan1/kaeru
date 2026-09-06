@@ -293,45 +293,60 @@ impl KaeruServer {
     #[tool(
         description = "Create a typed edge between two nodes (by name or id). Endpoints resolve in the active initiative first, then across all initiatives, so a link may span initiatives. Edge type defaults to `refers_to`. `weight` (0..1) is REQUIRED — it is HOW LOAD-BEARING the edge is and the only signal knowledge chains route on (path cost is 1−weight); there is no default because an unweighted graph makes every chain rank on noise. State it by the scale: 0.9–1.0 load-bearing (a cause, a source a conclusion rests on, a supersession — the edges a chain should follow); 0.6–0.8 supporting but not decisive; 0.3–0.5 loose / associative."
     )]
-    fn link(&self, Parameters(p): Parameters<LinkParams>) -> Result<CallToolResult, McpError> {
+    async fn link(
+        &self,
+        Parameters(p): Parameters<LinkParams>,
+    ) -> Result<CallToolResult, McpError> {
         tools::capture::link(
             &self.store,
+            &self.clouds,
+            p.cloud.as_deref(),
             &p.from,
             &p.to,
             &p.edge_type,
             p.weight,
             p.initiative.as_deref(),
         )
+        .await
     }
 
     #[tool(
         description = "Retract a previously-asserted edge. Bi-temporal — historical reads still see it."
     )]
-    fn unlink(&self, Parameters(p): Parameters<LinkParams>) -> Result<CallToolResult, McpError> {
+    async fn unlink(
+        &self,
+        Parameters(p): Parameters<LinkParams>,
+    ) -> Result<CallToolResult, McpError> {
         tools::capture::unlink(
             &self.store,
+            &self.clouds,
+            p.cloud.as_deref(),
             &p.from,
             &p.to,
             &p.edge_type,
             p.initiative.as_deref(),
         )
+        .await
     }
 
     #[tool(
         description = "Set an existing edge's connection strength (weight 0..1) in place. Stronger edges make shorter knowledge-chain paths; use to tune which links matter after the fact."
     )]
-    fn reweight(
+    async fn reweight(
         &self,
         Parameters(p): Parameters<ReweightParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::capture::reweight(
             &self.store,
+            &self.clouds,
+            p.cloud.as_deref(),
             &p.from,
             &p.to,
             &p.edge_type,
             p.weight,
             p.initiative.as_deref(),
         )
+        .await
     }
 
     // ----- Knowledge chains ---------------------------------------------

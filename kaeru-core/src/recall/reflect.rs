@@ -63,6 +63,18 @@ pub struct ReflectionReport {
     /// Shared nodes in scope. Touching the cloud (re-share, edge rebalance) is
     /// the user's call — escalate, don't auto-rewrite.
     pub shared: Vec<NodeId>,
+    /// Local edges whose **both** endpoints are shared — `(src, dst, type)`.
+    ///
+    /// The cloud's copy of the graph can lag these. Until #85 the graph verbs
+    /// had no path to the cloud at all, so every one of these was drift; they
+    /// propagate now, but an edge made before the fix, or one whose push was
+    /// refused, is still only local. Whether the cloud actually holds a given
+    /// edge is a question only the cloud can answer, and `reflect` is local
+    /// and read-only — so this is the candidate set, not a diagnosis.
+    ///
+    /// It exists because `reflect` was already printing advice about
+    /// "edge rebalance" while computing nothing whatsoever about edges.
+    pub shared_edges: Vec<(NodeId, NodeId, String)>,
     /// Open tasks whose `due:` date has already passed — `done` them, move
     /// them, or push the deadline. A maintenance item like any other: the
     /// graph knows the date passed, so the work-list should say so.
@@ -103,6 +115,7 @@ pub fn reflect(store: &Store) -> Result<ReflectionReport> {
         archivable: settleable.inert,
         cortex_size: cortex_size(store)?,
         shared: shared_nodes(store)?,
+        shared_edges: shared_edges(store)?,
         overdue_tasks: open_tasks(store)?
             .into_iter()
             .filter(|t| t.overdue)
@@ -379,6 +392,46 @@ fn cortex_size(store: &Store) -> Result<usize> {
         .db_ref()
         .run_script(script, params, ScriptMutability::Immutable)?;
     Ok(rows.rows.len())
+}
+
+/// Edges both of whose endpoints are shared — the set whose cloud copy can
+/// be out of date. Local and exact about what it is: an upper bound.
+fn shared_edges(store: &Store) -> Result<Vec<(NodeId, NodeId, String)>> {
+    let mut params: BTreeMap<String, DataValue> = BTreeMap::new();
+    let script = match store.current_initiative() {
+        Some(init) => {
+            params.insert("init".to_string(), DataValue::Str(init.into()));
+            r#"
+            shared[id] := *node{id, visibility @ 'NOW'}, visibility = 'shared',
+                          *node_initiative{initiative, node_id: id}, initiative = $init
+            ?[src, dst, edge_type] :=
+                *edge{src, dst, edge_type, dst_store @ 'NOW'}, dst_store = 'local',
+                shared[src], shared[dst]
+            "#
+        }
+        None => {
+            r#"
+            shared[id] := *node{id, visibility @ 'NOW'}, visibility = 'shared'
+            ?[src, dst, edge_type] :=
+                *edge{src, dst, edge_type, dst_store @ 'NOW'}, dst_store = 'local',
+                shared[src], shared[dst]
+            "#
+        }
+    };
+    let rows = store
+        .db_ref()
+        .run_script(script, params, ScriptMutability::Immutable)?;
+    Ok(rows
+        .rows
+        .iter()
+        .filter_map(|r| {
+            Some((
+                r.first().and_then(|v| v.get_str())?.to_string(),
+                r.get(1).and_then(|v| v.get_str())?.to_string(),
+                r.get(2).and_then(|v| v.get_str())?.to_string(),
+            ))
+        })
+        .collect())
 }
 
 /// Shared nodes in scope — any cloud-touching rebalance is the user's call.

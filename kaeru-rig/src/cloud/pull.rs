@@ -134,6 +134,11 @@ async fn do_pull(mem: &KaeruMemory, a: PullArgs) -> Value {
         Err(e) => return json!({ "error": e.to_string() }),
     };
 
+    // A cloud too old to send `properties` sends nothing, and `None` tells
+    // `upsert_node` to keep whatever is local rather than clear it — pulling a
+    // `cite` to refresh it used to destroy the URL it was cited for (#85).
+    let properties = v.get("properties").filter(|p| !p.is_null()).cloned();
+
     let id = a.id.clone();
     let init_w = init.clone();
     let name_w = name.clone();
@@ -150,6 +155,7 @@ async fn do_pull(mem: &KaeruMemory, a: PullArgs) -> Value {
                 Some(&init_w),
                 Visibility::Shared,
                 layer,
+                properties.as_ref(),
             )
         })
         .await;

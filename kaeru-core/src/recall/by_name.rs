@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use cozo::{DataValue, ScriptMutability};
+use cozo::{DataValue, JsonData, ScriptMutability};
 
 use super::fts::fuzzy_recall;
 use super::{NodeBrief, NodeFull, parse_brief};
@@ -193,8 +193,9 @@ pub fn read_node_full(store: &Store, id: &NodeId) -> Result<Option<NodeFull>> {
     params.insert("id".to_string(), DataValue::Str(id.clone().into()));
 
     let script = r#"
-        ?[type, tier, name, body, tags, visibility, layer] :=
-            *node{id, type, tier, name, body, tags, visibility, layer @ 'NOW'}, id = $id
+        ?[type, tier, name, body, tags, visibility, layer, properties] :=
+            *node{id, type, tier, name, body, tags, visibility, layer, properties @ 'NOW'},
+            id = $id
     "#;
     let rows = store
         .db_ref()
@@ -230,6 +231,10 @@ pub fn read_node_full(store: &Store, id: &NodeId) -> Result<Option<NodeFull>> {
         .and_then(|v| v.get_str())
         .map(String::from)
         .unwrap_or_else(|| "warm".to_string());
+    let properties = match row.get(7) {
+        Some(DataValue::Json(JsonData(v))) if !v.is_null() => Some(v.clone()),
+        _ => None,
+    };
 
     Ok(Some(NodeFull {
         id: id.clone(),
@@ -240,6 +245,7 @@ pub fn read_node_full(store: &Store, id: &NodeId) -> Result<Option<NodeFull>> {
         tags,
         visibility,
         layer,
+        properties,
     }))
 }
 
@@ -252,9 +258,9 @@ pub fn local_nodes_for_review(store: &Store, initiative: &str) -> Result<Vec<Nod
     params.insert("init".to_string(), DataValue::Str(initiative.into()));
 
     let script = r#"
-        ?[id, type, tier, name, body, tags, visibility, layer] :=
+        ?[id, type, tier, name, body, tags, visibility, layer, properties] :=
             *node_initiative{initiative, node_id: id}, initiative = $init,
-            *node{id, type, tier, name, body, tags, visibility, layer @ 'NOW'},
+            *node{id, type, tier, name, body, tags, visibility, layer, properties @ 'NOW'},
             visibility = 'local', type != 'audit_event'
     "#;
     let rows = store
@@ -297,6 +303,10 @@ pub fn local_nodes_for_review(store: &Store, initiative: &str) -> Result<Vec<Nod
                 .and_then(|v| v.get_str())
                 .map(String::from)
                 .unwrap_or_else(|| "warm".to_string());
+            let properties = match row.get(8) {
+                Some(DataValue::Json(JsonData(v))) if !v.is_null() => Some(v.clone()),
+                _ => None,
+            };
             NodeFull {
                 id,
                 node_type,
@@ -306,6 +316,7 @@ pub fn local_nodes_for_review(store: &Store, initiative: &str) -> Result<Vec<Nod
                 tags,
                 visibility,
                 layer,
+                properties,
             }
         })
         .collect();

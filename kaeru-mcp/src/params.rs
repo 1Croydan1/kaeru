@@ -315,6 +315,13 @@ pub struct LinkParams {
     /// decisive; 0.3–0.5 loose / associative. There is no neutral fallback on
     /// purpose: an unweighted graph is what made every chain rank on noise.
     pub weight: f64,
+    /// Which cloud to mirror this edge change to, when BOTH endpoints are
+    /// already shared. Omit with one cloud configured (it is unambiguous) or
+    /// when the endpoints are local. With several configured and none named,
+    /// the local edit still happens and the result says the edge was not
+    /// mirrored.
+    #[serde(default)]
+    pub cloud: Option<String>,
     #[serde(default)]
     pub initiative: Option<String>,
 }
@@ -336,6 +343,13 @@ pub struct ReweightParams {
     pub edge_type: String,
     /// New connection strength in `0..1` (1 = strong → shorter chain paths).
     pub weight: f64,
+    /// Which cloud to mirror this edge change to, when BOTH endpoints are
+    /// already shared. Omit with one cloud configured (it is unambiguous) or
+    /// when the endpoints are local. With several configured and none named,
+    /// the local edit still happens and the result says the edge was not
+    /// mirrored.
+    #[serde(default)]
+    pub cloud: Option<String>,
     #[serde(default)]
     pub initiative: Option<String>,
 }

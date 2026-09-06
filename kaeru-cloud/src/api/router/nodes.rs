@@ -29,6 +29,7 @@ use kaeru_core::{
     Layer, NodeFull, NodeType, Store, Tier, Visibility, forget, read_node_full, upsert_node,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::api::extractors::Authenticated;
 use crate::api::state::AppState;
@@ -59,6 +60,11 @@ pub struct NodeIngestReq {
     /// the cloud so recall priority survives share/pull. Defaults to `warm`.
     #[serde(default)]
     pub layer: Option<String>,
+    /// The node's `properties` JSON — a `reference`'s URL, a `board`'s status
+    /// registry. Omitted by an older client, in which case whatever the cloud
+    /// already holds is kept rather than cleared (#85).
+    #[serde(default)]
+    pub properties: Option<JsonValue>,
 }
 
 /// Full node view returned to the caller — the **untruncated** body and
@@ -73,6 +79,9 @@ pub struct NodeView {
     pub tags: Vec<String>,
     pub visibility: String,
     pub layer: String,
+    /// Always present, `null` when the node has none — a puller needs to be
+    /// able to tell "no properties" from "this cloud is too old to send them".
+    pub properties: Option<JsonValue>,
 }
 
 async fn ingest_node(
@@ -122,6 +131,7 @@ async fn ingest_node(
         Some(initiative),
         Visibility::Shared,
         layer,
+        req.properties.as_ref(),
     )?;
 
     let full = read_node_full(&store, &req.id)?.ok_or(ApiError::NotFound)?;
@@ -179,6 +189,7 @@ fn full_to_view(full: NodeFull) -> NodeView {
         tags: full.tags,
         visibility: full.visibility,
         layer: full.layer,
+        properties: full.properties,
     }
 }
 
@@ -348,5 +359,159 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let view: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(view["body"], "the corrected body");
+    }
+
+    /// A `cite`'s URL lives in `properties`, and the field was absent from
+    /// both the ingest request and the view — so of 78 references held in a
+    /// live cloud, not one carried the link it was cited for (#85).
+    #[tokio::test]
+    async fn a_citations_url_survives_the_round_trip() {
+        let app = app();
+        let mut payload = node(ID);
+        payload["node_type"] = serde_json::json!("reference");
+        payload["tier"] = serde_json::json!("archival");
+        payload["properties"] = serde_json::json!({ "url": "https://example.org/paper" });
+        assert_eq!(
+            app.clone().oneshot(post(payload)).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/nodes/{ID}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let view: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            view["properties"]["url"], "https://example.org/paper",
+            "the field the node exists for came back: {view}"
+        );
+    }
+
+    /// An older client sends no `properties` at all. That must read as "I have
+    /// nothing to say about them", not as "clear them" — the destructive case
+    /// was re-posting a reference and losing its URL.
+    #[tokio::test]
+    async fn an_omitted_properties_field_does_not_erase_what_is_stored() {
+        let app = app();
+        let mut first = node(ID);
+        first["properties"] = serde_json::json!({ "url": "https://example.org/paper" });
+        app.clone().oneshot(post(first)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        // The same node from a client that predates the field.
+        app.clone().oneshot(post(node(ID))).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/nodes/{ID}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let view: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            view["properties"]["url"], "https://example.org/paper",
+            "the URL survived a push that never mentioned it: {view}"
+        );
+    }
+
+    /// Until #85 an edge could only die by retracting one of its endpoint
+    /// nodes, so a local `unlink` had nowhere to send itself and the next
+    /// `pull` put the edge straight back.
+    #[tokio::test]
+    async fn an_edge_can_be_retracted_without_destroying_its_endpoints() {
+        const OTHER: &str = "01a03900-0000-7000-8000-000000000def";
+        let app = app();
+        app.clone().oneshot(post(node(ID))).await.unwrap();
+        let mut second = node(OTHER);
+        second["name"] = serde_json::json!("the-other-note");
+        app.clone().oneshot(post(second)).await.unwrap();
+
+        let edge = |method: &str| {
+            Request::builder()
+                .method(method)
+                .uri("/api/v1/edges")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "src": ID, "dst": OTHER, "edge_type": "causal", "weight": 0.9
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        assert_eq!(
+            app.clone().oneshot(edge("POST")).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+        let listed = |app: axum::Router| async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/initiatives/t/edges")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes)
+                .unwrap()
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0)
+        };
+        assert_eq!(listed(app.clone()).await, 1, "the edge is there");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert_eq!(
+            app.clone().oneshot(edge("DELETE")).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(listed(app.clone()).await, 0, "and gone, without the nodes");
+
+        // Both endpoints still read — the point of having a DELETE for edges.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/nodes/{ID}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "the node outlives its edge");
+    }
+
+    /// Retracting an edge that is already gone answers 204, so a client
+    /// retrying after a dropped connection is not told its success failed.
+    #[tokio::test]
+    async fn edge_retraction_is_idempotent() {
+        let app = app();
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/edges")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "src": ID, "dst": ID, "edge_type": "refers_to"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(req).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
     }
 }

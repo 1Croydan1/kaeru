@@ -178,6 +178,7 @@ pub fn create_chain(
                 store.current_initiative().as_deref(),
                 Visibility::Local,
                 layer,
+                None,
             )?;
         }
         // Uniform with the fresh-create path: an unscoped reuse also backfills
@@ -221,6 +222,7 @@ pub fn create_chain(
         initiative.as_deref(),
         Visibility::Local,
         Layer::Warm,
+        None,
     )?;
     // With no active scope the upsert left the chain node without any
     // membership, and a chain invisible to every scoped read is never

@@ -268,6 +268,9 @@ mem_tool!(
             // before applying it.
             "cortex_size": r.cortex_size,
             "shared_needs_user": r.shared,
+            // Edges whose cloud copy can be stale — the candidate set, not a
+            // diagnosis; only the cloud knows what the cloud holds (#85).
+            "shared_edges": r.shared_edges,
             "overdue_tasks": r.overdue_tasks,
         }),
         Err(e) => json!({ "error": e.to_string() }),

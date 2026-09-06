@@ -10,7 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use cozo::{DataValue, ScriptMutability};
+use cozo::{DataValue, JsonData, ScriptMutability};
+use serde_json::Value as JsonValue;
 
 use super::{NODE_VALUE_COLUMNS, node_row_values, now_validity_seconds, tags_literal};
 use crate::errors::Result;
@@ -26,6 +27,13 @@ use crate::store::Store;
 /// `layer` is stored as given, so a shared node keeps its recall priority
 /// when pushed to / pulled from the cloud. The node's `visibility` is stored
 /// as given; a node ingested into the shared cloud is typically `Shared`.
+///
+/// `properties` is **carried forward when `None`**, not cleared. This write
+/// asserts a whole new row, so a field it does not supply would otherwise be
+/// erased — and for a long time it hard-coded `null` there, which meant that
+/// pulling a `reference` to refresh it destroyed the URL the node existed for,
+/// and pulling a `board` destroyed its status registry (#85). A caller that
+/// genuinely wants to clear the field passes `Some(&Value::Null)`.
 #[allow(clippy::too_many_arguments)]
 pub fn upsert_node(
     store: &Store,
@@ -38,6 +46,7 @@ pub fn upsert_node(
     initiative: Option<&str>,
     visibility: Visibility,
     layer: Layer,
+    properties: Option<&JsonValue>,
 ) -> Result<()> {
     let mut params: BTreeMap<String, DataValue> = BTreeMap::new();
     params.insert("id".to_string(), DataValue::Str(id.clone().into()));
@@ -66,7 +75,20 @@ pub fn upsert_node(
     values.insert("body", "$body".to_string());
     values.insert("tags", tags_lit);
     values.insert("initiatives", "null".to_string());
-    values.insert("properties", "null".to_string());
+    // Supplied, or whatever the node already carries — never a blind null.
+    let carried = match properties {
+        Some(v) => Some(v.clone()),
+        None => read_properties_now(store, id)?,
+    };
+    match carried {
+        Some(v) => {
+            params.insert("properties".to_string(), DataValue::Json(JsonData(v)));
+            values.insert("properties", "$properties".to_string());
+        }
+        None => {
+            values.insert("properties", "null".to_string());
+        }
+    }
     values.insert("visibility", format!("'{}'", visibility.as_str()));
     values.insert("layer", format!("'{}'", layer.as_str()));
     let row_values = node_row_values(&values)?;
@@ -97,6 +119,22 @@ pub fn upsert_node(
 
     write_audit(store.db_ref(), "upsert_node", "system", &[id.clone()])?;
     Ok(())
+}
+
+/// The node's `properties` as they stand at NOW, so an upsert that was given
+/// none can put them back rather than drop them.
+fn read_properties_now(store: &Store, id: &NodeId) -> Result<Option<JsonValue>> {
+    let mut params: BTreeMap<String, DataValue> = BTreeMap::new();
+    params.insert("id".to_string(), DataValue::Str(id.clone().into()));
+    let rows = store.db_ref().run_script(
+        "?[properties] := *node{id, properties @ 'NOW'}, id = $id",
+        params,
+        ScriptMutability::Immutable,
+    )?;
+    Ok(match rows.rows.first().and_then(|r| r.first()) {
+        Some(DataValue::Json(JsonData(v))) if !v.is_null() => Some(v.clone()),
+        _ => None,
+    })
 }
 
 /// Upserts a `local` edge between two node ids, asserting a new
@@ -174,6 +212,7 @@ mod tests {
             Some("team-proj"),
             Visibility::Shared,
             Layer::Core,
+            None,
         )
         .unwrap();
 
@@ -193,6 +232,97 @@ mod tests {
                 .iter()
                 .any(|n| n == "team-proj"),
             "node attached to its initiative"
+        );
+    }
+
+    /// The destructive half of #85. `upsert_node` asserts a whole new row, so
+    /// a field it does not supply is erased — and it hard-coded `null` into
+    /// `properties`, which meant pulling a `cite` from the cloud to refresh it
+    /// destroyed the URL the node was cited for. `None` now means "keep what
+    /// is there", and only an explicit null clears it.
+    #[test]
+    fn an_upsert_that_is_given_no_properties_keeps_the_ones_it_has() {
+        use crate::cite;
+        use crate::recall::read_node_full;
+
+        let store = Store::open_in_memory().unwrap();
+        store.use_initiative("t");
+        let id = cite(
+            &store,
+            "the-paper",
+            Some("https://example.org/p"),
+            "abstract",
+        )
+        .unwrap();
+
+        // The shape of a pull: same id, same content, nothing said about
+        // properties.
+        upsert_node(
+            &store,
+            &id,
+            NodeType::Reference,
+            Tier::Archival,
+            "the-paper",
+            Some("abstract"),
+            &[],
+            Some("t"),
+            Visibility::Shared,
+            Layer::Warm,
+            None,
+        )
+        .unwrap();
+
+        let full = read_node_full(&store, &id).unwrap().expect("present");
+        assert_eq!(
+            full.properties
+                .as_ref()
+                .and_then(|p| p.get("url"))
+                .and_then(|u| u.as_str()),
+            Some("https://example.org/p"),
+            "the URL survived a pull that never mentioned it: {:?}",
+            full.properties
+        );
+    }
+
+    /// Supplied properties replace what is stored — the ordinary case, and
+    /// what makes a genuine correction possible.
+    #[test]
+    fn supplied_properties_replace_what_is_stored() {
+        use crate::cite;
+        use crate::recall::read_node_full;
+
+        let store = Store::open_in_memory().unwrap();
+        store.use_initiative("t");
+        let id = cite(
+            &store,
+            "the-paper",
+            Some("https://old.example/p"),
+            "abstract",
+        )
+        .unwrap();
+
+        upsert_node(
+            &store,
+            &id,
+            NodeType::Reference,
+            Tier::Archival,
+            "the-paper",
+            Some("abstract"),
+            &[],
+            Some("t"),
+            Visibility::Shared,
+            Layer::Warm,
+            Some(&serde_json::json!({ "url": "https://new.example/p" })),
+        )
+        .unwrap();
+
+        let full = read_node_full(&store, &id).unwrap().expect("present");
+        assert_eq!(
+            full.properties
+                .as_ref()
+                .and_then(|p| p.get("url"))
+                .and_then(|u| u.as_str()),
+            Some("https://new.example/p")
         );
     }
 }
