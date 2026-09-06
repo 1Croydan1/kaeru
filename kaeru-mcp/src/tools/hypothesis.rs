@@ -27,8 +27,8 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 
 use crate::utils::{
-    arc_closed_hint, capture_result, claim_verdict_hint, derive_auto_name, parse_layer,
-    resolve_name, resolve_name_or_id, text, to_mcp, with_initiative,
+    arc_closed_hint, arrival_note, capture_result, claim_verdict_hint, derive_auto_name,
+    parse_layer, resolve_name, resolve_name_or_id, text, to_mcp, with_initiative,
 };
 
 /// `↳ …` for a verdict recorded with nothing to point at.
@@ -50,6 +50,8 @@ pub fn claim(
     layer: Option<&str>,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
+    // Before the write: afterwards the initiative always has a node (#86).
+    let arrival = arrival_note(store, initiative);
     with_initiative(store, initiative, || {
         let auto_name = derive_auto_name(text_arg, "claim");
         let layer = parse_layer(layer)?;
@@ -92,13 +94,20 @@ pub fn claim(
             } else {
                 ""
             };
-            return Ok(text(&format!("{msg}{tail}")));
+            return Ok(text(&format!(
+                "{msg}{tail}{}",
+                arrival.clone().unwrap_or_default()
+            )));
         }
         Ok(capture_result(
             store,
             &id,
             initiative,
-            &format!("{msg}{}", claim_verdict_hint(&auto_name)),
+            &format!(
+                "{msg}{}{}",
+                claim_verdict_hint(&auto_name),
+                arrival.clone().unwrap_or_default()
+            ),
         ))
     })
 }

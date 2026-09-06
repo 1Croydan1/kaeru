@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use cozo::{DataValue, NamedRows, ScriptMutability};
 
 use super::board::effective_statuses;
+use super::initiatives::near_duplicate_initiatives;
 use super::lint;
 use super::open_work::open_tasks;
 use crate::errors::Result;
@@ -63,6 +64,10 @@ pub struct ReflectionReport {
     /// Shared nodes in scope. Touching the cloud (re-share, edge rebalance) is
     /// the user's call — escalate, don't auto-rewrite.
     pub shared: Vec<NodeId>,
+    /// Initiatives that look like different names for one thing —
+    /// `(a, b, why)`. The diagnosis for the condition `attach` is documented
+    /// to repair and that nothing ever reported (#86).
+    pub duplicate_initiatives: Vec<(String, String, String)>,
     /// Local edges whose **both** endpoints are shared — `(src, dst, type)`.
     ///
     /// The cloud's copy of the graph can lag these. Until #85 the graph verbs
@@ -116,6 +121,7 @@ pub fn reflect(store: &Store) -> Result<ReflectionReport> {
         cortex_size: cortex_size(store)?,
         shared: shared_nodes(store)?,
         shared_edges: shared_edges(store)?,
+        duplicate_initiatives: near_duplicate_initiatives(store)?,
         overdue_tasks: open_tasks(store)?
             .into_iter()
             .filter(|t| t.overdue)

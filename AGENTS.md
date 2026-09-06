@@ -204,6 +204,18 @@ In short: keep logic readable, keep imports explicit, and do not scatter long mo
 - Bi-temporal `Validity` is core to the design — when introducing a new stored relation in `kaeru-core`, decide explicitly whether `Validity` belongs in the PK. Most domain relations do (`node`, `edge`); junction relations do not.
 - `audit_event` nodes are written automatically by every mutation primitive in `kaeru-core`. Do not bypass mutation primitives by writing to substrate directly from `kaeru-mcp`.
 - The project is a **facilitator, not an enforcer**. MCP tools hint when context is missing (e.g. no active initiative); they do not block. Cognitive primitives are available tools, not mandatory protocol. Do not introduce required call sequences.
+- **Initiative names are guarded by saying, not by refusing.** An initiative
+  is the top-level scoping key and the one vocabulary any string can join: a
+  write under a name that does not exist creates it. That is right for a
+  facilitator — the name may be a genuinely new project — but it produced one
+  project's memory split across three names (#86). So a write whose initiative
+  has no nodes yet **says so and prints what exists**, adding a near-match line
+  when `suggest_initiative` finds one. Printing the list is the part that
+  matters: it is the only signal that reaches a translated or transliterated
+  alias, which shares no substring with the established name and is far away by
+  edit distance. `reflect` reports near-duplicate names (normalised spelling,
+  or shared members); `merge_initiative` rejoins two in one step. Prefer it to
+  `attach`-then-`delete_initiative`, which forgets any node you miss.
 - **The task board is the one deliberate exception.** `set_status` validates strictly against the initiative's status registry and refuses an unknown key. That is not enforcement of a *workflow* — any task may move to any column, in any order — it protects the registry's role as the single source of truth for a shared vocabulary: a typo must not silently spawn a phantom column. Widening the vocabulary stays an explicit act (`add_status`). The board describes columns; it never gates transitions.
 
 ## Backend Rules

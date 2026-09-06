@@ -35,6 +35,53 @@ pub fn attach(store: &Store, node: &str, to: &str) -> Result<CallToolResult, Mcp
     })
 }
 
+/// Merges `source` into `target` — the verb that was missing.
+///
+/// `rename_initiative` refuses a target that already exists, deliberately, so
+/// a rename cannot silently merge. That left no way at all to rejoin two names
+/// of one split project: `attach` on every node one at a time, then
+/// `delete_initiative` on the emptied name — a sequence whose cleanup step
+/// **forgets** any node the operator missed (#86).
+///
+/// Local-only, like `attach`. Merging in the cloud is a team-wide rewrite of a
+/// shared scope and deserves to be asked for separately rather than ridden in
+/// on a local tidy-up.
+pub fn merge_initiative(
+    store: &Store,
+    source: &str,
+    target: &str,
+) -> Result<CallToolResult, McpError> {
+    let known = kaeru_core::list_initiatives(store).map_err(to_mcp)?;
+    if !known.iter().any(|k| k == target.trim()) {
+        // Merging into a name that does not exist is a rename wearing the
+        // wrong verb — and, far more likely, a typo in the target. Say which.
+        return Ok(text(&format!(
+            "no initiative `{target}` — a merge joins an existing name. To move `{source}` to a \
+             fresh name use `rename_initiative`. Existing: {}",
+            known
+                .iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
+    let stats = kaeru_core::merge_initiative(store, source, target).map_err(to_mcp)?;
+    let mut msg = format!(
+        "merged `{source}` into `{target}` ({} node(s), {} edge(s) re-homed). `{source}` is gone; \
+         nothing was forgotten — a merge only ever moves memberships.",
+        stats.nodes, stats.edges
+    );
+    if stats.policy_kept_target {
+        msg.push_str(&format!(
+            "\n↳ `{target}` kept its own share policy; `{source}`'s was dropped rather than \
+             applied — a merge must not quietly widen where an initiative may go. Check it with \
+             `policy {target}`."
+        ));
+    }
+    Ok(text(&msg))
+}
+
 pub async fn rename_initiative(
     store: &Store,
     cloud: Option<&CloudClient>,
@@ -79,11 +126,25 @@ pub async fn delete_initiative(
     name: &str,
     also_cloud: bool,
 ) -> Result<CallToolResult, McpError> {
+    // What it is about to destroy, computed before it destroys it. Forgetting
+    // the nodes exclusive to a name is reasonable for an initiative genuinely
+    // unwanted and a data-loss trap for a duplicate — and someone reaching for
+    // this verb after a split is in the second case (#86).
+    let impact = kaeru_core::delete_initiative_impact(store, name).map_err(to_mcp)?;
     let stats = kaeru_core::delete_initiative(store, name).map_err(to_mcp)?;
     let mut msg = format!(
         "deleted `{name}` locally ({} forgotten, {} kept in other initiatives)",
         stats.forgotten, stats.unscoped
     );
+    if impact.forgotten > 0 {
+        msg.push_str(&format!(
+            "\n↳ {} node(s) lived only here and were forgotten. If `{name}` was a duplicate of \
+             another initiative rather than unwanted, that was the wrong verb — \
+             `merge_initiative` moves everything across and forgets nothing. Recover them by \
+             reading at a past moment: `at <name> <before now>`.",
+            impact.forgotten
+        ));
+    }
 
     if also_cloud {
         match cloud {

@@ -14,8 +14,8 @@ use rmcp::model::CallToolResult;
 use crate::cloud_client::{CloudClient, CloudRegistry};
 use crate::tools::cloud::{EdgeChange, propagate_edge, push_to_cloud};
 use crate::utils::{
-    capture_result, markup_strip_note, parse_layer, parse_wants_shared, resolve_link_endpoint,
-    text, to_mcp, with_initiative,
+    arrival_note, capture_result, markup_strip_note, parse_layer, parse_wants_shared,
+    resolve_link_endpoint, text, to_mcp, with_initiative,
 };
 
 /// When `want_share`, attempts to push the just-created node `id` to the
@@ -61,6 +61,8 @@ pub async fn episode(
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
     let want_share = parse_wants_shared(visibility)?;
+    // Before the write: afterwards the initiative always has a node (#86).
+    let arrival = arrival_note(store, initiative);
     let id = with_initiative(store, initiative, || {
         let layer = parse_layer(layer)?;
         kaeru_core::write_episode_with_layer(
@@ -78,6 +80,9 @@ pub async fn episode(
         msg.push_str(&note);
     }
     maybe_share(store, cloud, &id, initiative, want_share, &mut msg).await?;
+    if let Some(note) = arrival {
+        msg.push_str(&note);
+    }
     Ok(capture_result(store, &id, initiative, &msg))
 }
 
@@ -90,6 +95,7 @@ pub async fn jot(
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
     let want_share = parse_wants_shared(visibility)?;
+    let arrival = arrival_note(store, initiative);
     let id = with_initiative(store, initiative, || {
         let layer = parse_layer(layer)?;
         kaeru_core::jot_with_layer(store, body, layer).map_err(to_mcp)
@@ -104,6 +110,9 @@ pub async fn jot(
         msg.push_str(&note);
     }
     maybe_share(store, cloud, &id, initiative, want_share, &mut msg).await?;
+    if let Some(note) = arrival {
+        msg.push_str(&note);
+    }
     Ok(text(&msg))
 }
 
@@ -237,6 +246,7 @@ pub async fn cite(
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
     let want_share = parse_wants_shared(visibility)?;
+    let arrival = arrival_note(store, initiative);
     let id = with_initiative(store, initiative, || {
         let layer = parse_layer(layer)?;
         kaeru_core::cite_with_layer(store, name, url, body, layer).map_err(to_mcp)
@@ -249,6 +259,9 @@ pub async fn cite(
         msg.push_str(&note);
     }
     maybe_share(store, cloud, &id, initiative, want_share, &mut msg).await?;
+    if let Some(note) = arrival {
+        msg.push_str(&note);
+    }
     Ok(capture_result(store, &id, initiative, &msg))
 }
 
@@ -256,7 +269,7 @@ pub async fn cite(
 mod tests {
     use kaeru_core::{EpisodeKind, Significance, Store};
 
-    use super::{CloudRegistry, episode, link};
+    use super::{CloudRegistry, episode, jot, link};
 
     /// Seeds a node under `initiative` and returns its id.
     fn seed(store: &Store, initiative: &str, name: &str) -> String {
@@ -381,5 +394,72 @@ mod tests {
         .expect("link by id resolves");
 
         assert_eq!(edge_count(&store, &a, &b), 1, "edge was created from ids");
+    }
+
+    /// The change the report turns on: an initiative is the one vocabulary any
+    /// string can join silently, and writing under a name that does not exist
+    /// created it with no confirmation and no comparison against what was
+    /// already there (#86). It says so now, and prints the list — which is the
+    /// only thing that reaches the case no string metric can, an alias in
+    /// another script.
+    #[tokio::test]
+    async fn a_write_that_creates_an_initiative_says_so_and_lists_the_others() {
+        let store = Store::open_in_memory().expect("open");
+        seed(&store, "n8n-agents", "an-existing-note");
+
+        let out = jot(
+            &store,
+            None,
+            "a lesson note",
+            None,
+            None,
+            Some("kurs-agentov"),
+        )
+        .await
+        .expect("jot");
+        let rendered = format!("{:?}", out.content);
+
+        assert!(
+            rendered.contains("`kurs-agentov` is new"),
+            "the arrival is named: {rendered}"
+        );
+        assert!(
+            rendered.contains("n8n-agents"),
+            "and the established name is on screen to be recognised: {rendered}"
+        );
+    }
+
+    /// A near miss gets pointed at rather than left to be spotted in a list,
+    /// and the message names the verb that undoes it.
+    #[tokio::test]
+    async fn a_near_miss_is_named_with_the_verb_that_rejoins_it() {
+        let store = Store::open_in_memory().expect("open");
+        seed(&store, "alpha-beta", "a-note");
+
+        let out = jot(&store, None, "another note", None, None, Some("alpha_beta"))
+            .await
+            .expect("jot");
+        let rendered = format!("{:?}", out.content);
+
+        assert!(rendered.contains("Did you mean `alpha-beta`"), "{rendered}");
+        assert!(
+            rendered.contains("merge_initiative"),
+            "and how to fix it: {rendered}"
+        );
+    }
+
+    /// Writing into an initiative that already exists says nothing — the note
+    /// is for arrivals, and a line on every write would be noise.
+    #[tokio::test]
+    async fn an_ordinary_write_is_not_annotated() {
+        let store = Store::open_in_memory().expect("open");
+        seed(&store, "alpha", "a-note");
+
+        let out = jot(&store, None, "another note", None, None, Some("alpha"))
+            .await
+            .expect("jot");
+        let rendered = format!("{:?}", out.content);
+
+        assert!(!rendered.contains("is new"), "{rendered}");
     }
 }

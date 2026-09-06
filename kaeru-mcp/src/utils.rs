@@ -429,6 +429,70 @@ pub fn with_initiative<T>(
     store.scoped(initiative, |_store| f())
 }
 
+/// How many existing initiative names an arrival note prints before it
+/// summarises the rest. Long enough to recognise the established name of the
+/// project you are in, short enough not to bury the write's own result.
+const ARRIVAL_LIST_CAP: usize = 12;
+
+/// The note for a write landing in an initiative that has no nodes yet —
+/// computed **before** the write, since afterwards it is no longer true.
+///
+/// Initiative is the one vocabulary in kaeru that any string can join
+/// silently: writing under a name that does not exist creates it, with no
+/// confirmation and no comparison against what is already there. In a vault
+/// built over three months that produced one project's memory split across
+/// three names, 74 writes stranded outside the scope holding the other 858
+/// (#86).
+///
+/// AGENTS.md already made the opposite call for the board, where `set_status`
+/// validates strictly because "a typo must not silently spawn a phantom
+/// column". The same argument applies with more force to the key that scopes
+/// the whole vault — but a refusal is the wrong instrument here, because this
+/// is a facilitator: the name may well be a genuinely new project.
+///
+/// So it says so, and prints the list. That is what covers the case no string
+/// metric can: an alias in another script shares no substring with the
+/// established name and is far away by edit distance, and the agent still
+/// recognises the right name on sight. The near-match line is added on top
+/// when the helper finds one, because a one-character difference deserves to
+/// be pointed at rather than looked for.
+///
+/// Cheap enough to run on every write: two reads of a junction relation.
+pub fn arrival_note(store: &Store, initiative: Option<&str>) -> Option<String> {
+    let init = initiative?.trim();
+    if init.is_empty() {
+        return None;
+    }
+    let known = kaeru_core::list_initiatives(store).ok()?;
+    if known.iter().any(|k| k == init) {
+        return None;
+    }
+
+    let mut note = format!("\n↳ `{init}` is new — this is its first node.");
+    if let Ok(Some(near)) = kaeru_core::suggest_initiative(store, init) {
+        note.push_str(&format!(
+            " Did you mean `{near}`? If so, `merge_initiative {init} {near}` puts them back \
+             together."
+        ));
+    }
+    if known.is_empty() {
+        return Some(note);
+    }
+    note.push_str("\n  Existing: ");
+    note.push_str(
+        &known
+            .iter()
+            .take(ARRIVAL_LIST_CAP)
+            .map(|k| format!("`{k}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    if known.len() > ARRIVAL_LIST_CAP {
+        note.push_str(&format!(" … and {} more", known.len() - ARRIVAL_LIST_CAP));
+    }
+    Some(note)
+}
+
 pub fn resolve_name(store: &Store, name: &str) -> Result<NodeId, McpError> {
     match kaeru_core::recall_id_by_name(store, name).map_err(to_mcp)? {
         Some(id) => Ok(id),

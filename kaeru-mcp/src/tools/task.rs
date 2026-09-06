@@ -5,7 +5,7 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 
 use crate::utils::{
-    arc_closed_hint, parse_due_to_iso, parse_layer, resolve_name_or_id, text, to_mcp,
+    arc_closed_hint, arrival_note, parse_due_to_iso, parse_layer, resolve_name_or_id, text, to_mcp,
     with_initiative,
 };
 
@@ -16,6 +16,8 @@ pub fn task(
     layer: Option<&str>,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
+    // Before the write: afterwards the initiative always has a node (#86).
+    let arrival = arrival_note(store, initiative);
     with_initiative(store, initiative, || {
         let due_iso = match due {
             Some(d) => Some(parse_due_to_iso(d)?),
@@ -29,10 +31,13 @@ pub fn task(
             .flatten()
             .map(|b| b.name)
             .unwrap_or_default();
-        let label = match due_iso.as_deref() {
+        let mut label = match due_iso.as_deref() {
             Some(d) => format!("task: {name} (due {d}) — {id}"),
             None => format!("task: {name} — {id}"),
         };
+        if let Some(note) = &arrival {
+            label.push_str(note);
+        }
         Ok(text(&label))
     })
 }

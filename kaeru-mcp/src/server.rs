@@ -565,7 +565,17 @@ impl KaeruServer {
     }
 
     #[tool(
-        description = "Add a node to another initiative (additive multi-membership) — repair initiative fragmentation by giving a node captured under the wrong or a stale initiative a second home, without moving or copying it (same id, edges, history). The node is resolved across all initiatives. Idempotent. Local only."
+        description = "Merge one initiative INTO another — the fix for a project whose memory ended up split across two names (a typo, a separator, a translated alias). Re-homes every node and edge of `source` into `target` in ONE step and removes `source`. Nothing is forgotten: a merge only moves memberships, so unlike `attach`-then-`delete_initiative` it cannot lose a node you missed. `target` must already exist (use `rename_initiative` to move to a fresh name). `target` keeps its own share policy. Local only. `reflect` lists the candidates."
+    )]
+    fn merge_initiative(
+        &self,
+        Parameters(p): Parameters<MergeInitiativeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::initiative::merge_initiative(&self.store, &p.source, &p.target)
+    }
+
+    #[tool(
+        description = "Add a node to another initiative (additive multi-membership) — repair initiative fragmentation by giving a node captured under the wrong or a stale initiative a second home, without moving or copying it (same id, edges, history). The node is resolved across all initiatives. Idempotent. Local only. For a whole initiative rather than a few nodes, `merge_initiative` is the one-step version."
     )]
     fn attach(&self, Parameters(p): Parameters<AttachParams>) -> Result<CallToolResult, McpError> {
         tools::initiative::attach(&self.store, &p.node, &p.to)

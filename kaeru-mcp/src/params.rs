@@ -158,6 +158,16 @@ pub struct AttachParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct MergeInitiativeParams {
+    /// Initiative to merge FROM. It stops existing; every node and edge in it
+    /// becomes a member of `target`. Nothing is forgotten.
+    pub source: String,
+    /// Initiative to merge INTO — must already exist. It keeps its own share
+    /// policy when both have one.
+    pub target: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ScopeOnly {
     /// Optional initiative to scope the operation to. When omitted,
     /// reads are cross-initiative; mutations end up un-tagged.

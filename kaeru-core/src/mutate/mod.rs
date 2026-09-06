@@ -47,7 +47,8 @@ pub use hypothesis::{
 };
 pub use ingest::{upsert_edge, upsert_node};
 pub use initiative::{
-    AttachStats, DeleteStats, RenameStats, attach_node, delete_initiative, rename_initiative,
+    AttachStats, DeleteStats, MergeStats, RenameStats, attach_node, delete_initiative,
+    delete_initiative_impact, merge_initiative, rename_initiative,
 };
 pub use layer::{get_layer, set_layer, set_layer_as};
 pub use metabolism::{forget, improve};

@@ -271,6 +271,8 @@ mem_tool!(
             // Edges whose cloud copy can be stale — the candidate set, not a
             // diagnosis; only the cloud knows what the cloud holds (#85).
             "shared_edges": r.shared_edges,
+            // Names that may be one project split in two (#86).
+            "duplicate_initiatives": r.duplicate_initiatives,
             "overdue_tasks": r.overdue_tasks,
         }),
         Err(e) => json!({ "error": e.to_string() }),

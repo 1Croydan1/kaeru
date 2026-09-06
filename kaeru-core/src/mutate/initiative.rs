@@ -185,6 +185,192 @@ pub fn rename_initiative(store: &Store, old: &str, new: &str) -> Result<RenameSt
     })
 }
 
+/// Counts moved by [`merge_initiative`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeStats {
+    /// Nodes re-homed into the target (some may already have been members).
+    pub nodes: usize,
+    /// Edges re-homed into the target.
+    pub edges: usize,
+    /// True when the source carried a share policy the target already had, so
+    /// the source's was dropped rather than overwriting the target's.
+    pub policy_kept_target: bool,
+}
+
+/// Merges initiative `source` **into** `target`: every node and edge of the
+/// source becomes a member of the target, and the source name is removed.
+///
+/// This exists because the two names of one split project could not be
+/// rejoined by any single verb (#86). `rename_initiative` refuses a target
+/// that already exists — deliberately, so a rename cannot silently merge —
+/// which left `attach` on every node one at a time, followed by
+/// `delete_initiative` on the emptied name. That sequence has a trap in it:
+/// `delete_initiative` **forgets** every node exclusive to the name it
+/// removes, so a node the operator missed is destroyed by the cleanup meant
+/// to be safe.
+///
+/// Doing it as one operation is the whole point: memberships are added to the
+/// target *before* the source's rows are dropped, so at no moment is a node
+/// exclusive to a name being deleted, and nothing can be left behind to
+/// forget. Nothing is retracted here at all — a merge only ever adds a
+/// membership and drops a junction row.
+///
+/// The target's share policy wins when both have one. A merge should not be
+/// able to loosen where an initiative may go: `MergeStats::policy_kept_target`
+/// says when that happened so the caller can mention it.
+pub fn merge_initiative(store: &Store, source: &str, target: &str) -> Result<MergeStats> {
+    let source = source.trim();
+    let target = target.trim();
+    if source.is_empty() || target.is_empty() {
+        return Err(Error::Invalid(
+            "both initiative names must be non-empty".to_string(),
+        ));
+    }
+    if source == target {
+        return Err(Error::Invalid(
+            "source and target are the same initiative".to_string(),
+        ));
+    }
+    let nodes = node_ids_in(store, source)?;
+    if nodes.is_empty() {
+        return Err(Error::NotFound(format!(
+            "initiative `{source}` has no nodes — nothing to merge"
+        )));
+    }
+
+    let edges = run_read(
+        store,
+        "?[edge_pk] := *edge_initiative{initiative, edge_pk}, initiative = $init",
+        one("init", source),
+    )?
+    .rows
+    .len();
+
+    let mut both = BTreeMap::new();
+    both.insert("source".to_string(), DataValue::Str(source.into()));
+    both.insert("target".to_string(), DataValue::Str(target.into()));
+
+    // Add first, remove second. The order is the safety property: a node is a
+    // member of the target before it stops being a member of the source, so
+    // it is never briefly homeless.
+    run_mut(
+        store,
+        r#"
+        ?[initiative, node_id] := *node_initiative{initiative: si, node_id}, si = $source,
+                                  initiative = $target
+        :put node_initiative {initiative, node_id}
+        "#,
+        both.clone(),
+    )?;
+    run_mut(
+        store,
+        r#"
+        ?[initiative, edge_pk] := *edge_initiative{initiative: si, edge_pk}, si = $source,
+                                  initiative = $target
+        :put edge_initiative {initiative, edge_pk}
+        "#,
+        both.clone(),
+    )?;
+
+    // The target keeps its own policy; the source's row is only moved when
+    // the target has none. Widening where an initiative may be shared is not
+    // something a merge should do quietly.
+    let target_has_policy = !run_read(
+        store,
+        "?[share_policy] := *initiative{name, share_policy}, name = $n",
+        one("n", target),
+    )?
+    .rows
+    .is_empty();
+    let source_has_policy = !run_read(
+        store,
+        "?[share_policy] := *initiative{name, share_policy}, name = $n",
+        one("n", source),
+    )?
+    .rows
+    .is_empty();
+    if !target_has_policy && source_has_policy {
+        run_mut(
+            store,
+            r#"
+            ?[name, share_policy] := *initiative{name: s, share_policy}, s = $source,
+                                     name = $target
+            :put initiative {name => share_policy}
+            "#,
+            both.clone(),
+        )?;
+    }
+
+    run_mut(
+        store,
+        r#"
+        ?[initiative, node_id] := *node_initiative{initiative, node_id}, initiative = $source
+        :rm node_initiative {initiative, node_id}
+        "#,
+        one("source", source),
+    )?;
+    run_mut(
+        store,
+        r#"
+        ?[initiative, edge_pk] := *edge_initiative{initiative, edge_pk}, initiative = $source
+        :rm edge_initiative {initiative, edge_pk}
+        "#,
+        one("source", source),
+    )?;
+    run_mut(
+        store,
+        r#"
+        ?[name] := *initiative{name}, name = $source
+        :rm initiative {name}
+        "#,
+        one("source", source),
+    )?;
+
+    write_audit(
+        store.db_ref(),
+        "merge_initiative",
+        "system",
+        &[source.to_string(), target.to_string()],
+    )?;
+    Ok(MergeStats {
+        nodes: nodes.len(),
+        edges,
+        policy_kept_target: target_has_policy && source_has_policy,
+    })
+}
+
+/// What [`delete_initiative`] would destroy, without destroying it.
+///
+/// `delete_initiative` forgets every node exclusive to the name it removes.
+/// That is reasonable for an initiative genuinely not wanted and a data-loss
+/// trap for a duplicate — which is the case someone reaching for it after a
+/// split is most likely in (#86). The caller is expected to say the number
+/// out loud before acting on it.
+pub fn delete_initiative_impact(store: &Store, name: &str) -> Result<DeleteStats> {
+    let name = name.trim();
+    let mut unscoped = 0usize;
+    let mut forgotten = 0usize;
+    for nid in node_ids_in(store, name)? {
+        let elsewhere = run_read(
+            store,
+            "?[initiative] := *node_initiative{initiative, node_id}, node_id = $nid",
+            one("nid", &nid),
+        )?
+        .rows
+        .len();
+        // Membership in this initiative is one of the rows counted.
+        if elsewhere > 1 {
+            unscoped += 1
+        } else {
+            forgotten += 1
+        }
+    }
+    Ok(DeleteStats {
+        unscoped,
+        forgotten,
+    })
+}
+
 /// Deletes initiative `name`: drops its membership rows and policy, then
 /// `forget`s every node that was **exclusive** to it (now in no initiative
 /// at all). Nodes shared with other initiatives only lose this one
@@ -298,12 +484,15 @@ pub fn attach_node(store: &Store, node_id: &NodeId, initiative: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_node, delete_initiative, rename_initiative};
+    use super::{
+        attach_node, delete_initiative, delete_initiative_impact, merge_initiative,
+        rename_initiative,
+    };
     use crate::graph::EdgeType;
     use crate::store::Store;
     use crate::{
         EpisodeKind, SharePolicy, Significance, get_share_policy, link, list_initiatives,
-        recall_id_by_name, set_share_policy, write_episode,
+        node_brief_by_id, recall_id_by_name, set_share_policy, write_episode,
     };
 
     #[test]
@@ -485,5 +674,136 @@ mod tests {
             .is_err(),
             "attaching a non-existent node errors"
         );
+    }
+
+    /// Seeds `count` episodes under `init` and returns their ids.
+    fn seed_n(store: &Store, init: &str, count: usize) -> Vec<String> {
+        store.use_initiative(init);
+        (0..count)
+            .map(|i| {
+                write_episode(
+                    store,
+                    EpisodeKind::Observation,
+                    Significance::Low,
+                    &format!("{init}-note-{i}"),
+                    "body",
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// The whole point of the verb: everything moves, in one step, and the
+    /// source name is gone. `rename_initiative` refuses an existing target on
+    /// purpose, so before this there was no way at all to rejoin two names of
+    /// one project (#86).
+    #[test]
+    fn merge_rehomes_everything_and_removes_the_source() {
+        let store = Store::open_in_memory().expect("open");
+        let ids = seed_n(&store, "alpha_beta", 3);
+        seed_n(&store, "alpha-beta", 1);
+        link(&store, &ids[0], &ids[1], EdgeType::RefersTo).unwrap();
+
+        let stats = merge_initiative(&store, "alpha_beta", "alpha-beta").unwrap();
+        assert_eq!(stats.nodes, 3);
+
+        let names = list_initiatives(&store).unwrap();
+        assert!(!names.iter().any(|n| n == "alpha_beta"), "source gone");
+        assert!(names.iter().any(|n| n == "alpha-beta"), "target stands");
+        for id in &ids {
+            assert!(
+                node_brief_by_id(&store, id).unwrap().is_some(),
+                "every node still reads — a merge forgets nothing"
+            );
+        }
+    }
+
+    /// The safety property that makes this verb worth having over
+    /// attach-then-delete, stated as the contrast the report draws:
+    /// `delete_initiative` on the duplicate destroys the notes in it, and a
+    /// merge cannot, because memberships are added to the target before the
+    /// source's rows are dropped — no node is ever briefly in no initiative.
+    #[test]
+    fn merge_keeps_what_delete_would_destroy() {
+        let alive = |store: &Store, ids: &[String]| {
+            ids.iter()
+                .filter(|id| node_brief_by_id(store, id).unwrap().is_some())
+                .count()
+        };
+
+        let merged = Store::open_in_memory().expect("open");
+        let kept = seed_n(&merged, "duplicate", 4);
+        seed_n(&merged, "canonical", 1);
+        merge_initiative(&merged, "duplicate", "canonical").unwrap();
+        assert_eq!(alive(&merged, &kept), 4, "a merge forgets nothing");
+
+        let deleted = Store::open_in_memory().expect("open");
+        let lost = seed_n(&deleted, "duplicate", 4);
+        seed_n(&deleted, "canonical", 1);
+        // Validities are whole seconds: a retract inside the second of the
+        // assert cannot be ordered against it, so cross the boundary before
+        // asking the substrate to forget.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        delete_initiative(&deleted, "duplicate").unwrap();
+        assert_eq!(
+            alive(&deleted, &lost),
+            0,
+            "while the obvious cleanup destroys every note in the duplicate"
+        );
+    }
+
+    /// A merge must not quietly widen where an initiative may be shared, so
+    /// the target's policy wins and the caller is told it happened.
+    #[test]
+    fn the_target_keeps_its_own_share_policy() {
+        let store = Store::open_in_memory().expect("open");
+        seed_n(&store, "loose", 1);
+        seed_n(&store, "strict", 1);
+        set_share_policy(&store, "loose", SharePolicy::Team).unwrap();
+        set_share_policy(&store, "strict", SharePolicy::Private).unwrap();
+
+        let stats = merge_initiative(&store, "loose", "strict").unwrap();
+        assert!(stats.policy_kept_target, "and it says so");
+        assert_eq!(
+            get_share_policy(&store, "strict").unwrap(),
+            SharePolicy::Private,
+            "merging a `team` initiative in did not open `strict`"
+        );
+    }
+
+    /// The source's policy moves only into a target that has none, so a merge
+    /// does not silently drop a restriction either.
+    #[test]
+    fn a_target_without_a_policy_inherits_the_sources() {
+        let store = Store::open_in_memory().expect("open");
+        seed_n(&store, "source", 1);
+        seed_n(&store, "target", 1);
+        set_share_policy(&store, "source", SharePolicy::Team).unwrap();
+
+        let stats = merge_initiative(&store, "source", "target").unwrap();
+        assert!(!stats.policy_kept_target);
+        assert_eq!(
+            get_share_policy(&store, "target").unwrap(),
+            SharePolicy::Team
+        );
+    }
+
+    /// `delete_initiative_impact` answers the question the verb never asked
+    /// out loud: how many nodes are about to be destroyed.
+    #[test]
+    fn the_delete_impact_is_knowable_before_the_delete() {
+        let store = Store::open_in_memory().expect("open");
+        let ids = seed_n(&store, "doomed", 3);
+        seed_n(&store, "other", 1);
+        attach_node(&store, &ids[0], "other").unwrap();
+
+        let impact = delete_initiative_impact(&store, "doomed").unwrap();
+        assert_eq!(impact.forgotten, 2, "two live only here");
+        assert_eq!(impact.unscoped, 1, "one has a second home");
+
+        // And the prediction matches what actually happens.
+        let stats = delete_initiative(&store, "doomed").unwrap();
+        assert_eq!(stats.forgotten, impact.forgotten);
+        assert_eq!(stats.unscoped, impact.unscoped);
     }
 }

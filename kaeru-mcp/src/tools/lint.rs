@@ -63,6 +63,7 @@ pub fn reflect(store: &Store, initiative: Option<&str>) -> Result<CallToolResult
             + r.cortex_candidates.len()
             + r.archivable.len()
             + r.shared_edges.len()
+            + r.duplicate_initiatives.len()
             + r.shared.len()
             + r.overdue_tasks.len()
             + r.contested_claims.len()
@@ -151,6 +152,22 @@ pub fn reflect(store: &Store, initiative: Option<&str>) -> Result<CallToolResult
             "ASK THE USER before any re-share or edge rebalance — never touch the cloud yourself",
             &r.shared,
         );
+        // Fragmentation had a cure and no diagnosis: `attach_node` is
+        // documented verbatim as "the repair primitive for initiative
+        // fragmentation" and was called seven times in a 6,003-call corpus,
+        // while three projects sat split across two or three names each (#86).
+        if !r.duplicate_initiatives.is_empty() {
+            out.push_str(&format!(
+                "\ninitiatives that may be one thing ({}) — memory split across names is invisible \
+                 until something looks. `merge_initiative <source> <target>` re-homes every node \
+                 and edge in one step, or `attach <node> <initiative>` for a few. Sub-scoping \
+                 (`proj` beside `proj-api`) looks the same from here and is fine — you decide:\n",
+                r.duplicate_initiatives.len()
+            ));
+            for (a, b, why) in &r.duplicate_initiatives {
+                out.push_str(&format!("  - `{a}` · `{b}` — {why}\n"));
+            }
+        }
         // The section that used to advise about "edge rebalance" while
         // computing nothing about edges (#85). It still cannot be a
         // diagnosis — only the cloud knows what the cloud holds — so it says
