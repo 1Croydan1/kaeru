@@ -35,8 +35,9 @@ pub fn text(s: &str) -> CallToolResult {
 /// save the reasoning trail with `chain`. A hint in the result, not a gate:
 /// the substrate is a facilitator, not an enforcer.
 pub const CAPTURE_NUDGE: &str = "\n↳ now connect it: `search` related → `link` \
-     (strong=true for key edges); when a line of work runs start→decision/outcome, \
-     `chain(from, to)` to save the reasoning trail. Don't leave it an island.";
+     (`weight` 0..1 is required — 0.9+ for a load-bearing edge); when a line of work runs \
+     start→decision/outcome, `chain(from, to)` to save the reasoning trail. \
+     Don't leave it an island.";
 
 /// Capture result for the knowledge-forming verbs (`episode`, `cite`,
 /// `claim`). Appends [`CAPTURE_NUDGE`] only when the new node is actually an

@@ -340,6 +340,35 @@ fn default_edge_type() -> String {
     "refers_to".to_string()
 }
 
+/// Retracting an edge does not weigh it. `unlink` used to reuse
+/// [`LinkParams`], which made `weight` a required field on a deletion — so an
+/// agent had to invent a connection strength for an edge it was removing, and
+/// the value was discarded. Its own struct is the fix.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnlinkParams {
+    /// Source node name or id — resolved in the active initiative first,
+    /// then across all initiatives, so an edge may span initiatives.
+    pub from: String,
+    /// Destination node name or id — resolved in the active initiative
+    /// first, then across all initiatives.
+    pub to: String,
+    /// Edge type to retract — the same CLOSED vocabulary `link` writes:
+    /// `refers_to` (default), `causal`, `derived_from`, `contradicts`,
+    /// `part_of`, `blocks`, `targets`, `supersedes`, `verifies`, `falsifies`,
+    /// `temporal`, `consolidated_to`. Snake_case or kebab-case both accepted.
+    #[serde(default = "default_edge_type")]
+    pub edge_type: String,
+    /// Which cloud to mirror this retraction to, when BOTH endpoints are
+    /// already shared. Omit with one cloud configured (it is unambiguous) or
+    /// when the endpoints are local. With several configured and none named,
+    /// the local edit still happens and the result says the edge was not
+    /// mirrored.
+    #[serde(default)]
+    pub cloud: Option<String>,
+    #[serde(default)]
+    pub initiative: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReweightParams {
     /// Source node name or id — resolved in the active initiative first,
@@ -757,4 +786,39 @@ pub struct HygieneParams {
     /// Run a pass now instead of reporting what one would do.
     #[serde(default)]
     pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LinkParams, UnlinkParams};
+
+    /// A retraction names an edge; it does not weigh one. `unlink` reused
+    /// `LinkParams`, so the required `weight` landed on it too and a caller
+    /// had to invent a strength for an edge it was deleting.
+    #[test]
+    fn unlink_does_not_ask_for_a_weight() {
+        let p: UnlinkParams = serde_json::from_str(
+            r#"{"from": "a", "to": "b", "edge_type": "causal", "initiative": "demo"}"#,
+        )
+        .expect("unlink deserializes without a weight");
+        assert_eq!(p.edge_type, "causal");
+        assert!(
+            serde_json::from_str::<LinkParams>(
+                r#"{"from": "a", "to": "b", "edge_type": "causal"}"#
+            )
+            .is_err()
+        );
+    }
+
+    /// The edge type stays optional on a retraction, defaulting the same way
+    /// `link` does, so `unlink a b` retracts the `refers_to` edge `link a b`
+    /// would have written.
+    #[test]
+    fn unlink_defaults_the_edge_type_like_link() {
+        let p: UnlinkParams =
+            serde_json::from_str(r#"{"from": "a", "to": "b"}"#).expect("from + to is enough");
+        assert_eq!(p.edge_type, "refers_to");
+        assert!(p.cloud.is_none());
+        assert!(p.initiative.is_none());
+    }
 }
