@@ -16,8 +16,9 @@ use crate::graph::audit::write_audit;
 use crate::graph::{Layer, NodeId, Tier};
 use crate::mutate::initiatives_of_node;
 use crate::recall::{
-    LayerBucket, NodeBrief, OpenTask, chains_in_scope, list_initiatives, open_claims, open_tasks,
-    recall_by_layer_in_tier, recent_episodes, under_review_pinned,
+    DueReminder, LayerBucket, NodeBrief, OpenTask, chains_in_scope, due_reminders,
+    list_initiatives, open_claims, open_tasks, recall_by_layer_in_tier, recent_episodes,
+    under_review_pinned,
 };
 use crate::store::Store;
 
@@ -120,6 +121,13 @@ pub struct AwakenedContext {
     /// written *for the next session*; surfacing it as a named trail with its
     /// summary is what makes that next session able to use it.
     pub chains: Vec<NodeBrief>,
+    /// Reminders whose named moment has arrived and whose insistence window is
+    /// still open — the capture that said "not yet relevant" and now is.
+    ///
+    /// A debt, not an opportunity, and rendered as one: the RFC's hardest-won
+    /// result is that an in-output line converts when it names something owed
+    /// and does not when it names something available (#79, #90).
+    pub due_reminders: Vec<DueReminder>,
 }
 
 /// Composite session-restoration primitive. Single call an agent makes
@@ -156,6 +164,7 @@ pub fn awake(store: &Store) -> Result<AwakenedContext> {
         open_tasks: open_tasks(store)?,
         open_claims: open_claims(store)?,
         chains: chains_in_scope(store)?,
+        due_reminders: due_reminders(store)?,
     })
 }
 

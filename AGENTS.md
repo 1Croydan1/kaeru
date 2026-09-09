@@ -216,6 +216,19 @@ In short: keep logic readable, keep imports explicit, and do not scatter long mo
   edit distance. `reflect` reports near-duplicate names (normalised spelling,
   or shared members); `merge_initiative` rejoins two in one step. Prefer it to
   `attach`-then-`delete_initiative`, which forgets any node you miss.
+- **A capture can name a future moment (#90).** `after:YYYY-MM-DD` says a node
+  is not relevant until then; `for:<N>d` says how many days to keep insisting
+  once it surfaces; `seen:YYYY-MM-DD` is written once, when it is first
+  actually delivered. Three rules hold and each has a reason worth keeping:
+  the window runs from **first sight**, not from the date, so a fortnight away
+  from the keyboard cannot eat a reminder; firing is a **read**
+  (`due_reminders`, the shape of `open_tasks`), never a layer promotion, so it
+  cannot be silently truncated out of the capped layer listings and works
+  whether or not a hygiene pass runs; and `for:` has **no default**, because
+  `link`'s optional weight was passed in 0 of 1,262 real calls and a default
+  guarantees nobody chooses. The `seen:` stamp is written where delivery
+  happens — `awake` — following `take_pending_report`, which already clears the
+  hygiene headline as it hands it over.
 - **The task board is the one deliberate exception.** `set_status` validates strictly against the initiative's status registry and refuses an unknown key. That is not enforcement of a *workflow* — any task may move to any column, in any order — it protects the registry's role as the single source of truth for a shared vocabulary: a typo must not silently spawn a phantom column. Widening the vocabulary stays an explicit act (`add_status`). The board describes columns; it never gates transitions.
 
 ## Backend Rules

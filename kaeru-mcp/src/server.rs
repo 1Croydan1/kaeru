@@ -268,6 +268,8 @@ impl KaeruServer {
             &p.body,
             p.layer.as_deref(),
             p.visibility.as_deref(),
+            p.after.as_deref(),
+            p.for_days,
             p.initiative.as_deref(),
         )
         .await;
@@ -284,6 +286,8 @@ impl KaeruServer {
             &p.body,
             p.layer.as_deref(),
             p.visibility.as_deref(),
+            p.after.as_deref(),
+            p.for_days,
             p.initiative.as_deref(),
         )
         .await;
@@ -408,6 +412,8 @@ impl KaeruServer {
             &p.body,
             p.layer.as_deref(),
             p.visibility.as_deref(),
+            p.after.as_deref(),
+            p.for_days,
             p.initiative.as_deref(),
         )
         .await;

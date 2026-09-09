@@ -106,6 +106,49 @@ pub fn awake(store: &Store, initiative: Option<&str>) -> Result<CallToolResult, 
         // three are what is still *owed* — the entities that were written and
         // then never revisited, because nothing on the re-entry path
         // mentioned them.
+        // Reminders lead the read-back: unlike the sections below, a reminder
+        // has a moment and the moment is NOW. It is also the only one that
+        // goes quiet on its own, so it can afford to be loud while it lasts.
+        if !ctx.due_reminders.is_empty() {
+            out.push_str(&format!(
+                "\n⏰ reminders due ({}):\n",
+                ctx.due_reminders.len()
+            ));
+            for r in ctx.due_reminders.iter().take(READBACK_CAP) {
+                out.push_str(&format!("  - since {} — {} — {}\n", r.after, r.name, r.id));
+                if let Some(e) = &r.body_excerpt {
+                    out.push_str(&format!("    {e}\n"));
+                }
+            }
+            out.push_str(&readback_overflow(
+                ctx.due_reminders.len(),
+                "`tagged \"after:\"`",
+            ));
+            // Named as something owed, never as something available: a line
+            // that names a debt converts, one that names an opportunity does
+            // not — `open reviews (2)` produced 8 calls where "trails exist,
+            // read one" produced 0 at 7 delivered hints (#79).
+            out.push_str(
+                "↳ these were set aside FOR NOW — read them before you plan. Each stops \
+                 appearing when the window its author set runs out.\n",
+            );
+            // Delivery is a fact only the deliverer knows, and the window has
+            // to run from it rather than from the date — so the stamp is
+            // written here, where the reminder actually reached a reader.
+            // Same shape and same justification as `take_pending_report`,
+            // which clears the hygiene headline as it hands it over. Only the
+            // ones that fitted are stamped: a reminder cut off by the cap was
+            // not delivered, so its clock must not start.
+            for r in ctx.due_reminders.iter().take(READBACK_CAP) {
+                if r.is_first_sighting() {
+                    // Best-effort: failing to stamp makes a reminder repeat,
+                    // which is the safe direction. It must never fail a
+                    // re-entry.
+                    let _ = kaeru_core::stamp_reminder_seen(store, &r.id);
+                }
+            }
+        }
+
         // Tasks come deadline-first, so the cap keeps whatever is most urgent.
         out.push_str(&format!("\nopen tasks ({}):\n", ctx.open_tasks.len()));
         for t in ctx.open_tasks.iter().take(READBACK_CAP) {
@@ -701,5 +744,117 @@ mod tests {
         kaeru_core::set_share_policy(&store, "t", kaeru_core::SharePolicy::Team).expect("policy");
         let out = text_of(awake(&store, Some("t")).unwrap());
         assert!(out.contains("may hold"), "hedged, not counted: {out}");
+    }
+
+    /// End to end, the arc #90 describes: a capture names a future moment,
+    /// stays out of re-entry until it arrives, then appears as a debt — and
+    /// the delivery starts its window rather than the calendar doing it.
+    #[tokio::test]
+    async fn a_reminder_surfaces_at_its_moment_and_is_stamped_on_delivery() {
+        use chrono::Utc;
+
+        let store = Store::open_in_memory().expect("open");
+        let yesterday = (Utc::now().date_naive() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        let next_month = (Utc::now().date_naive() + chrono::Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        crate::tools::capture::episode(
+            &store,
+            None,
+            "cert-renewal-breaks-on-tls-not-auth",
+            "a failed renewal looks like anything except an expired certificate",
+            None,
+            None,
+            Some(&yesterday),
+            Some(7),
+            Some("t"),
+        )
+        .await
+        .expect("capture");
+        crate::tools::capture::episode(
+            &store,
+            None,
+            "not-yet-relevant",
+            "true later",
+            None,
+            None,
+            Some(&next_month),
+            Some(7),
+            Some("t"),
+        )
+        .await
+        .expect("capture");
+
+        let first = awake(&store, Some("t")).expect("awake");
+        let rendered = format!("{:?}", first.content);
+        assert!(
+            rendered.contains("reminders due (1)"),
+            "the arrived one, and only it: {rendered}"
+        );
+        // Scoped to the reminders block: the not-yet node is an ordinary node
+        // and still appears in the layer listing, which is right — what it
+        // must not do is present itself as due. Which layer an unarrived
+        // reminder sits in stays the author's choice (`layer=cold` keeps it
+        // out of the working set entirely), exactly as #90 sketched it.
+        let reminders_block = rendered
+            .split("⏰ reminders due")
+            .nth(1)
+            .and_then(|t| t.split("open tasks").next())
+            .expect("the section rendered");
+        assert!(
+            reminders_block.contains("cert-renewal-breaks-on-tls-not-auth"),
+            "{reminders_block}"
+        );
+        assert!(
+            !reminders_block.contains("not-yet-relevant"),
+            "a month out is not today's business: {reminders_block}"
+        );
+
+        // Delivered once — so the window has started, and it still shows
+        // inside that window rather than vanishing after one sighting.
+        let id = kaeru_core::recall_id_by_name(&store, "cert-renewal-breaks-on-tls-not-auth")
+            .expect("resolve")
+            .expect("exists");
+        let full = kaeru_core::read_node_full(&store, &id)
+            .expect("read")
+            .expect("present");
+        assert!(
+            full.tags.iter().any(|t| t.starts_with("seen:")),
+            "delivery started the clock: {:?}",
+            full.tags
+        );
+
+        let second = awake(&store, Some("t")).expect("awake");
+        assert!(
+            format!("{:?}", second.content).contains("reminders due (1)"),
+            "the window is days, not sessions"
+        );
+    }
+
+    /// Half a reminder is refused rather than defaulted — the `link` weight
+    /// lesson: an optional value with a fallback gets the fallback every time.
+    #[tokio::test]
+    async fn a_date_without_a_window_is_refused() {
+        let store = Store::open_in_memory().expect("open");
+        let err = crate::tools::capture::episode(
+            &store,
+            None,
+            "half-a-reminder",
+            "body",
+            None,
+            None,
+            Some("2026-12-01"),
+            None,
+            Some("t"),
+        )
+        .await
+        .expect_err("a date with no window is not a reminder");
+        assert!(
+            format!("{err:?}").contains("for_days"),
+            "and says which half is missing: {err:?}"
+        );
     }
 }

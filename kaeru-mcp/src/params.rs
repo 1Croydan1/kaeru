@@ -278,6 +278,19 @@ pub struct EpisodeParams {
     /// refused rather than sent to a default you did not name.
     #[serde(default)]
     pub cloud: Option<String>,
+    /// Optional: hold this back until `after` (YYYY-MM-DD), then surface it in
+    /// `awake` as a debt. For something TRUE LATER, NOT NOW — a certificate
+    /// that expires, a number to re-measure before quoting it again, work to
+    /// pick up after the next release. Requires `for_days`.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Optional: how many days the reminder keeps appearing once it surfaces.
+    /// REQUIRED with `after`, and there is no default — state it deliberately,
+    /// because "the certificate expires" and "re-measure this" want completely
+    /// different windows. The window starts when the reminder is first
+    /// actually seen, so it cannot expire while nobody is looking.
+    #[serde(default)]
+    pub for_days: Option<i64>,
     #[serde(default)]
     pub initiative: Option<String>,
 }
@@ -300,6 +313,19 @@ pub struct JotParams {
     /// refused rather than sent to a default you did not name.
     #[serde(default)]
     pub cloud: Option<String>,
+    /// Optional: hold this back until `after` (YYYY-MM-DD), then surface it in
+    /// `awake` as a debt. For something TRUE LATER, NOT NOW — a certificate
+    /// that expires, a number to re-measure before quoting it again, work to
+    /// pick up after the next release. Requires `for_days`.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Optional: how many days the reminder keeps appearing once it surfaces.
+    /// REQUIRED with `after`, and there is no default — state it deliberately,
+    /// because "the certificate expires" and "re-measure this" want completely
+    /// different windows. The window starts when the reminder is first
+    /// actually seen, so it cannot expire while nobody is looking.
+    #[serde(default)]
+    pub for_days: Option<i64>,
     #[serde(default)]
     pub initiative: Option<String>,
 }
@@ -706,6 +732,19 @@ pub struct CiteParams {
     /// refused rather than sent to a default you did not name.
     #[serde(default)]
     pub cloud: Option<String>,
+    /// Optional: hold this back until `after` (YYYY-MM-DD), then surface it in
+    /// `awake` as a debt. For something TRUE LATER, NOT NOW — a certificate
+    /// that expires, a number to re-measure before quoting it again, work to
+    /// pick up after the next release. Requires `for_days`.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Optional: how many days the reminder keeps appearing once it surfaces.
+    /// REQUIRED with `after`, and there is no default — state it deliberately,
+    /// because "the certificate expires" and "re-measure this" want completely
+    /// different windows. The window starts when the reminder is first
+    /// actually seen, so it cannot expire while nobody is looking.
+    #[serde(default)]
+    pub for_days: Option<i64>,
     #[serde(default)]
     pub initiative: Option<String>,
 }

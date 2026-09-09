@@ -494,6 +494,46 @@ pub fn arrival_note(store: &Store, initiative: Option<&str>) -> Option<String> {
     Some(note)
 }
 
+/// Applies a capture's optional reminder pair, and refuses half of one.
+///
+/// `after` and `for_days` are all-or-nothing on purpose. A date with no window
+/// would need a default window, and the whole design says there isn't one: the
+/// `link` weight precedent is that an optional value with a fallback gets the
+/// fallback 1,262 times out of 1,262. A window with no date has nothing to
+/// count from.
+///
+/// Returns the line to append to the capture's result, or `None` when no
+/// reminder was asked for.
+pub fn apply_reminder(
+    store: &Store,
+    id: &NodeId,
+    after: Option<&str>,
+    for_days: Option<i64>,
+) -> Result<Option<String>, McpError> {
+    match (after, for_days) {
+        (None, None) => Ok(None),
+        (Some(after), Some(days)) => {
+            kaeru_core::set_reminder(store, id, after, days).map_err(to_mcp)?;
+            Ok(Some(format!(
+                "\n↳ set aside until {after}, then surfacing in `awake` for {days} day(s)."
+            )))
+        }
+        (Some(_), None) => Err(McpError::invalid_params(
+            "`after` needs `for_days`: how many days the reminder keeps appearing once it \
+             surfaces. There is no default — a reminder nobody chose a window for is one that \
+             either vanishes unseen or never stops."
+                .to_string(),
+            None,
+        )),
+        (None, Some(_)) => Err(McpError::invalid_params(
+            "`for_days` needs `after`: the date the reminder becomes relevant. A window has \
+             nothing to count from without one."
+                .to_string(),
+            None,
+        )),
+    }
+}
+
 pub fn resolve_name(store: &Store, name: &str) -> Result<NodeId, McpError> {
     match kaeru_core::recall_id_by_name(store, name).map_err(to_mcp)? {
         Some(id) => Ok(id),

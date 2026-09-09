@@ -26,6 +26,7 @@ pub mod ingest;
 pub mod initiative;
 pub mod layer;
 pub mod metabolism;
+pub mod reminder;
 pub mod review;
 pub mod sharing;
 pub mod slot;
@@ -52,6 +53,7 @@ pub use initiative::{
 };
 pub use layer::{get_layer, set_layer, set_layer_as};
 pub use metabolism::{forget, improve};
+pub use reminder::{set_reminder, stamp_reminder_seen};
 pub use review::{mark_resolved, mark_under_review, resolve_review};
 pub use sharing::{
     get_share_policy, get_visibility, initiative_clouds, permits_cloud, set_initiative_clouds,

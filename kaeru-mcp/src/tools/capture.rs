@@ -14,8 +14,8 @@ use rmcp::model::CallToolResult;
 use crate::cloud_client::{CloudClient, CloudRegistry};
 use crate::tools::cloud::{EdgeChange, propagate_edge, push_to_cloud};
 use crate::utils::{
-    arrival_note, capture_result, markup_strip_note, parse_layer, parse_wants_shared,
-    resolve_link_endpoint, text, to_mcp, with_initiative,
+    apply_reminder, arrival_note, capture_result, markup_strip_note, parse_layer,
+    parse_wants_shared, resolve_link_endpoint, text, to_mcp, with_initiative,
 };
 
 /// When `want_share`, attempts to push the just-created node `id` to the
@@ -58,6 +58,8 @@ pub async fn episode(
     body: &str,
     layer: Option<&str>,
     visibility: Option<&str>,
+    after: Option<&str>,
+    for_days: Option<i64>,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
     let want_share = parse_wants_shared(visibility)?;
@@ -75,11 +77,15 @@ pub async fn episode(
         )
         .map_err(to_mcp)
     })?;
+    let reminder = apply_reminder(store, &id, after, for_days)?;
     let mut msg = format!("wrote episode: {name} — {id}");
     if let Some(note) = markup_strip_note(&[("name", name), ("body", body)]) {
         msg.push_str(&note);
     }
     maybe_share(store, cloud, &id, initiative, want_share, &mut msg).await?;
+    if let Some(note) = &reminder {
+        msg.push_str(note);
+    }
     if let Some(note) = arrival {
         msg.push_str(&note);
     }
@@ -92,6 +98,8 @@ pub async fn jot(
     body: &str,
     layer: Option<&str>,
     visibility: Option<&str>,
+    after: Option<&str>,
+    for_days: Option<i64>,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
     let want_share = parse_wants_shared(visibility)?;
@@ -105,11 +113,15 @@ pub async fn jot(
         .flatten()
         .map(|b| b.name)
         .unwrap_or_default();
+    let reminder = apply_reminder(store, &id, after, for_days)?;
     let mut msg = format!("jotted: {name} — {id}");
     if let Some(note) = markup_strip_note(&[("body", body)]) {
         msg.push_str(&note);
     }
     maybe_share(store, cloud, &id, initiative, want_share, &mut msg).await?;
+    if let Some(note) = &reminder {
+        msg.push_str(note);
+    }
     if let Some(note) = arrival {
         msg.push_str(&note);
     }
@@ -243,6 +255,8 @@ pub async fn cite(
     body: &str,
     layer: Option<&str>,
     visibility: Option<&str>,
+    after: Option<&str>,
+    for_days: Option<i64>,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
     let want_share = parse_wants_shared(visibility)?;
@@ -251,6 +265,7 @@ pub async fn cite(
         let layer = parse_layer(layer)?;
         kaeru_core::cite_with_layer(store, name, url, body, layer).map_err(to_mcp)
     })?;
+    let reminder = apply_reminder(store, &id, after, for_days)?;
     let mut msg = match url {
         Some(u) => format!("cited: {name} ({u}) — {id}"),
         None => format!("cited: {name} — {id}"),
@@ -259,6 +274,9 @@ pub async fn cite(
         msg.push_str(&note);
     }
     maybe_share(store, cloud, &id, initiative, want_share, &mut msg).await?;
+    if let Some(note) = &reminder {
+        msg.push_str(note);
+    }
     if let Some(note) = arrival {
         msg.push_str(&note);
     }
@@ -298,6 +316,8 @@ mod tests {
             Some("core"),
             None,
             None,
+            None,
+            None,
         )
         .await;
         assert!(res.is_err(), "a core node with no initiative is refused");
@@ -314,6 +334,8 @@ mod tests {
             "body",
             Some("core"),
             None,
+            None,
+            None,
             Some("proj"),
         )
         .await;
@@ -324,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn a_warm_note_without_initiative_is_accepted() {
         let store = Store::open_in_memory().expect("open");
-        let res = episode(&store, None, "note", "body", None, None, None).await;
+        let res = episode(&store, None, "note", "body", None, None, None, None, None).await;
         assert!(res.is_ok(), "warm/hot untagged capture stays allowed");
     }
 
@@ -413,6 +435,8 @@ mod tests {
             "a lesson note",
             None,
             None,
+            None,
+            None,
             Some("kurs-agentov"),
         )
         .await
@@ -436,9 +460,18 @@ mod tests {
         let store = Store::open_in_memory().expect("open");
         seed(&store, "alpha-beta", "a-note");
 
-        let out = jot(&store, None, "another note", None, None, Some("alpha_beta"))
-            .await
-            .expect("jot");
+        let out = jot(
+            &store,
+            None,
+            "another note",
+            None,
+            None,
+            None,
+            None,
+            Some("alpha_beta"),
+        )
+        .await
+        .expect("jot");
         let rendered = format!("{:?}", out.content);
 
         assert!(rendered.contains("Did you mean `alpha-beta`"), "{rendered}");
@@ -455,9 +488,18 @@ mod tests {
         let store = Store::open_in_memory().expect("open");
         seed(&store, "alpha", "a-note");
 
-        let out = jot(&store, None, "another note", None, None, Some("alpha"))
-            .await
-            .expect("jot");
+        let out = jot(
+            &store,
+            None,
+            "another note",
+            None,
+            None,
+            None,
+            None,
+            Some("alpha"),
+        )
+        .await
+        .expect("jot");
         let rendered = format!("{:?}", out.content);
 
         assert!(!rendered.contains("is new"), "{rendered}");
