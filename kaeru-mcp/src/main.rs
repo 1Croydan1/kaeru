@@ -182,15 +182,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // hygiene scheduler can hold a child of it and stop cleanly on shutdown.
     let cancel = CancellationToken::new();
 
-    // Hygiene keeps memory from silting up. Opt-in via
-    // `KAERU_MCP_HYGIENE_ENABLE=1`: the first pass re-layers a live graph in
-    // one go, so that should be a deliberate act rather than a side effect of
-    // upgrading. `hygiene <initiative>` shows what a pass would move before
-    // you turn it on.
-    let hygiene_enabled = matches!(
-        std::env::var("KAERU_MCP_HYGIENE_ENABLE").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE")
-    );
+    // Hygiene keeps memory from silting up, and it is ON by default.
+    //
+    // It used to be opt-in, on the reasoning that a first pass re-layers a
+    // live graph in one go and that should be deliberate. Two things retired
+    // that argument. It is the only part of the product that does its work
+    // without being asked — 33 nodes re-layered on its first real pass, with
+    // nobody told to run anything — while every feature that needed the agent
+    // to *choose* to call it went unused however well it was advertised. And
+    // being off silently disables fixes that depend on it: #75 made an
+    // oversized `core` demote back to its ceiling, and with no pass running
+    // that never happens at all.
+    //
+    // A pass only ever changes a node's `layer`, is audited under the
+    // `hygiene` actor, skips anything an agent touched since collection, and
+    // reverses with one `layer` call — so the cost of it being wrong is a
+    // command, while the cost of it never running is a memory that silts up
+    // invisibly.
+    //
+    // `KAERU_MCP_HYGIENE_ENABLE=0` turns it off for a vault that wants the old
+    // behaviour; `hygiene <initiative>` still shows what the next pass would
+    // move without moving it.
+    let hygiene_enabled =
+        hygiene_enabled_from(std::env::var("KAERU_MCP_HYGIENE_ENABLE").ok().as_deref());
 
     let server = KaeruServer::new(store, clouds, cancel.child_token(), hygiene_enabled);
     server.hygiene_scheduler().spawn_sweeper();
@@ -434,4 +448,48 @@ async fn normalize_mcp_accept(
         );
     }
     next.run(request).await
+}
+
+/// Whether background hygiene runs, from `KAERU_MCP_HYGIENE_ENABLE`.
+///
+/// Unset means ON. The variable exists to turn it OFF, which is the inverse of
+/// what it meant before 0.8.0 — so it is a named function with tests rather
+/// than an inline `matches!`, because silently flipping the sense of an env var
+/// a vault already sets is exactly the kind of thing that should fail a test
+/// if anyone reverses it again.
+fn hygiene_enabled_from(var: Option<&str>) -> bool {
+    !matches!(
+        var.map(str::trim),
+        Some("0") | Some("false") | Some("FALSE") | Some("no") | Some("off")
+    )
+}
+
+#[cfg(test)]
+mod hygiene_flag_tests {
+    use super::hygiene_enabled_from;
+
+    /// The change: a daemon nobody configured sweeps. Off meant the fixes that
+    /// depend on a pass ever running were silently inert — #75's oversized
+    /// `core` never came down, because nothing ever ran to bring it down.
+    #[test]
+    fn unset_means_on() {
+        assert!(hygiene_enabled_from(None));
+    }
+
+    /// The variable now exists to opt OUT.
+    #[test]
+    fn the_documented_off_values_turn_it_off() {
+        for v in ["0", "false", "FALSE", "no", "off", " 0 "] {
+            assert!(!hygiene_enabled_from(Some(v)), "{v:?} should disable");
+        }
+    }
+
+    /// A vault that set `=1` under the old opt-in rule keeps working, and says
+    /// the same thing it always did.
+    #[test]
+    fn the_old_opt_in_value_still_means_on() {
+        for v in ["1", "true", "TRUE", "yes", ""] {
+            assert!(hygiene_enabled_from(Some(v)), "{v:?} should enable");
+        }
+    }
 }

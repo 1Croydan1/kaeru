@@ -44,9 +44,11 @@ pub struct HygieneScheduler {
     /// module docs.
     in_flight: Arc<Mutex<HashSet<String>>>,
     cancel: CancellationToken,
-    /// Set from `KAERU_MCP_HYGIENE_ENABLE`; when false, every trigger is a
-    /// no-op. Opt-in: a vault gets its first sweep only once its owner has
-    /// asked for one, so an upgrade never re-layers a live graph unannounced.
+    /// On by default; set `KAERU_MCP_HYGIENE_ENABLE=0` to disable, which makes
+    /// every trigger a no-op. It was opt-in until 0.8.0, on the reasoning that
+    /// a first sweep should be asked for — but off also silently disabled the
+    /// fixes that depend on a pass ever running, and hygiene is the one part
+    /// of the product that demonstrably works without being called.
     enabled: bool,
     /// Passes actually started since the daemon came up. Surfaced by the
     /// `hygiene` tool, and the assertion target for the double-start test.
@@ -135,7 +137,7 @@ impl HygieneScheduler {
     /// ever evaluated when something touches the initiative.
     pub fn spawn_sweeper(&self) {
         if !self.enabled {
-            tracing::info!("hygiene off (set KAERU_MCP_HYGIENE_ENABLE=1 to turn it on)");
+            tracing::info!("hygiene off (KAERU_MCP_HYGIENE_ENABLE=0; unset it to turn it on)");
             return;
         }
         let interval_secs = self.store.config().hygiene_sweep_interval_secs;

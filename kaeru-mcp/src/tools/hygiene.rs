@@ -75,7 +75,9 @@ pub fn hygiene(
         None => "  due: no\n".to_string(),
     });
     if scheduler.is_disabled() {
-        out.push_str("  ⚠ off — set KAERU_MCP_HYGIENE_ENABLE=1 to let passes run\n");
+        out.push_str(
+            "  ⚠ off — this vault set KAERU_MCP_HYGIENE_ENABLE=0; unset it to let passes run\n",
+        );
     } else {
         out.push_str(&format!(
             "  passes since this daemon started: {}\n",
