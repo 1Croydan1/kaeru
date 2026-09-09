@@ -315,7 +315,7 @@ impl KaeruServer {
     )]
     async fn unlink(
         &self,
-        Parameters(p): Parameters<LinkParams>,
+        Parameters(p): Parameters<UnlinkParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::capture::unlink(
             &self.store,
