@@ -21,29 +21,34 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use kaeru_core::{
     Layer, NodeFull, NodeType, Store, Tier, Visibility, forget, read_node_full, upsert_node,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
+use crate::api::docs::ErrorBody;
 use crate::api::extractors::Authenticated;
 use crate::api::state::AppState;
 use crate::errors::ApiError;
 
-pub fn nodes_router() -> Router<AppState> {
-    Router::new()
-        .route("/", post(ingest_node))
-        .route("/{id}", get(get_node).delete(retract_node))
+pub const NODES_TAG: &str = "nodes";
+
+pub fn nodes_router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(ingest_node))
+        .routes(routes!(get_node, retract_node))
 }
 
 /// A node being pushed up from a local vault. `id` is the local node's
 /// UUIDv7, preserved verbatim so soft links resolve.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct NodeIngestReq {
     pub id: String,
     pub node_type: String,
@@ -55,6 +60,7 @@ pub struct NodeIngestReq {
     pub tags: Vec<String>,
     /// Initiative this node belongs to — the shared scope on both sides.
     #[serde(default)]
+    #[schema(required = true, value_type = String)]
     pub initiative: Option<String>,
     /// Memory layer (`core`/`hot`/`warm`/`cold`/`frozen`). Preserved across
     /// the cloud so recall priority survives share/pull. Defaults to `warm`.
@@ -64,12 +70,13 @@ pub struct NodeIngestReq {
     /// registry. Omitted by an older client, in which case whatever the cloud
     /// already holds is kept rather than cleared (#85).
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub properties: Option<JsonValue>,
 }
 
 /// Full node view returned to the caller — the **untruncated** body and
 /// tier/tags, so a puller can materialise the node locally verbatim.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NodeView {
     pub id: String,
     pub node_type: String,
@@ -81,9 +88,22 @@ pub struct NodeView {
     pub layer: String,
     /// Always present, `null` when the node has none — a puller needs to be
     /// able to tell "no properties" from "this cloud is too old to send them".
+    #[schema(value_type = Option<Object>)]
     pub properties: Option<JsonValue>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/",
+    tag = NODES_TAG,
+    request_body = NodeIngestReq,
+    responses(
+        (status = 201, description = "Stored — the node as the cloud now holds it.", body = NodeView),
+        (status = 400, description = "Unknown node_type / tier / layer, an empty name, or no initiative.", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn ingest_node(
     _: Authenticated,
     State(store): State<Arc<Store>>,
@@ -138,6 +158,18 @@ async fn ingest_node(
     Ok((StatusCode::CREATED, Json(full_to_view(full))))
 }
 
+#[utoipa::path(
+    get,
+    path = "/{id}",
+    tag = NODES_TAG,
+    params(("id" = String, Path, description = "The node's UUIDv7, preserved from the local vault it was shared from.")),
+    responses(
+        (status = 200, description = "The node at NOW, untruncated.", body = NodeView),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+        (status = 404, description = "No node with that id at NOW — never shared, or retracted.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn get_node(
     _: Authenticated,
     State(store): State<Arc<Store>>,
@@ -168,6 +200,17 @@ async fn get_node(
 /// introduces — every mutation in kaeru shares it — but it surfaces here more
 /// than elsewhere, because "share it, then immediately think better of it" is
 /// a real sequence. Retrying the retraction a second later settles it.
+#[utoipa::path(
+    delete,
+    path = "/{id}",
+    tag = NODES_TAG,
+    params(("id" = String, Path, description = "The node's UUIDv7.")),
+    responses(
+        (status = 204, description = "Retracted — or already gone; the call is idempotent."),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn retract_node(
     _: Authenticated,
     State(store): State<Arc<Store>>,

@@ -6,7 +6,11 @@
 //! "service / domain layer" the handlers delegate to is simply
 //! `kaeru-core` — there is no separate persistence layer in this crate.
 
+pub mod docs;
 pub mod errors;
 pub mod extractors;
 pub mod router;
 pub mod state;
+
+#[cfg(test)]
+mod openapi_tests;

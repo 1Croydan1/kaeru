@@ -20,6 +20,9 @@ serde.workspace = true
 serde_json.workspace = true
 config.workspace = true
 thiserror.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+utoipa-swagger-ui.workspace = true
 
 [dev-dependencies]
 # Router-level tests: `tower::util::ServiceExt::oneshot` drives the axum

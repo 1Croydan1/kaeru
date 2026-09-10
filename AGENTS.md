@@ -287,6 +287,14 @@ where an initiative may go is the only thing that catches that.
 - **A node must name an initiative.** A POST without one is refused: the
   substrate accepts it, and then nothing that walks initiatives can ever see
   it again — including `cloud_recall`.
+- **The cloud describes itself (#70).** `/openapi.json`, with Swagger UI at
+  `/docs`, is generated from the handlers through `utoipa-axum`: a route is
+  registered by the same `#[utoipa::path]` attribute the spec is built from, so
+  the two cannot disagree. Always served, unauthenticated. Never hand-maintain a
+  second description of a payload — a payload reverse-engineered from 422s is
+  how #70 happened. Closed vocabularies (`node_type`, `tier`, `layer`,
+  `edge_type`) are filled in from the core's `VALID` lists by `docs::finalise`,
+  after the router is built; a `Modify` would run too early to see the schemas.
 - **`DELETE /api/v1/edges` retracts one edge**, by `src`/`dst`/`edge_type` in
   the body (a path segment cannot hold two UUIDs and a type). Bi-temporal and
   idempotent, like the node retraction. Without it a cloud edge could only die

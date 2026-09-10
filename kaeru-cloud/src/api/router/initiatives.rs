@@ -9,32 +9,37 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::routing::{delete, get, post};
-use axum::{Json, Router};
 use kaeru_core::{
     Error, Store, count_nodes_in_initiative, delete_initiative, edges_in_initiative,
     list_initiatives, nodes_in_initiative, rename_initiative,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
+use crate::api::docs::ErrorBody;
 use crate::api::extractors::Authenticated;
 use crate::api::router::edges::EdgeView;
 use crate::api::state::AppState;
 use crate::errors::ApiError;
 
-pub fn initiatives_router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(list_all))
-        .route("/{name}/nodes", get(list_nodes))
-        .route("/{name}/edges", get(list_edges))
-        .route("/{name}/rename", post(rename))
-        .route("/{name}", delete(remove))
+pub const INITIATIVES_TAG: &str = "initiatives";
+
+pub fn initiatives_router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(list_all))
+        .routes(routes!(list_nodes))
+        .routes(routes!(list_edges))
+        .routes(routes!(rename))
+        .routes(routes!(remove))
 }
 
 /// One row of the initiative listing: the name plus a live (at NOW,
 /// audit-events excluded) node count.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct InitiativeBrief {
     pub name: String,
     pub nodes: usize,
@@ -44,6 +49,16 @@ pub struct InitiativeBrief {
 /// come from the append-only `node_initiative` junction, so an initiative
 /// whose nodes were all since forgotten still appears — with `nodes: 0` —
 /// which is itself useful discovery signal.
+#[utoipa::path(
+    get,
+    path = "/",
+    tag = INITIATIVES_TAG,
+    responses(
+        (status = 200, description = "Every initiative the cloud holds, with live node counts.", body = Vec<InitiativeBrief>),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn list_all(
     _: Authenticated,
     State(store): State<Arc<Store>>,
@@ -57,24 +72,37 @@ async fn list_all(
     Ok(Json(views))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RenameReq {
     pub new: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RenameResp {
     pub nodes: usize,
     pub edges: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteResp {
     pub unscoped: usize,
     pub forgotten: usize,
 }
 
 /// Renames an initiative across the whole shared store — team-wide.
+#[utoipa::path(
+    post,
+    path = "/{name}/rename",
+    tag = INITIATIVES_TAG,
+    params(("name" = String, Path, description = "The initiative name, exactly as stored.")),
+    request_body = RenameReq,
+    responses(
+        (status = 200, description = "Renamed team-wide.", body = RenameResp),
+        (status = 400, description = "The new name is empty, identical, or already exists.", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn rename(
     _: Authenticated,
     State(store): State<Arc<Store>>,
@@ -92,6 +120,17 @@ async fn rename(
 }
 
 /// Deletes an initiative from the whole shared store — team-wide.
+#[utoipa::path(
+    delete,
+    path = "/{name}",
+    tag = INITIATIVES_TAG,
+    params(("name" = String, Path, description = "The initiative name, exactly as stored.")),
+    responses(
+        (status = 200, description = "Deleted team-wide: nodes exclusive to it are forgotten, shared ones lose only this membership.", body = DeleteResp),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn remove(
     _: Authenticated,
     State(store): State<Arc<Store>>,
@@ -105,7 +144,7 @@ async fn remove(
 }
 
 /// Compact node view for discovery listings.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NodeBriefView {
     pub id: String,
     pub node_type: String,
@@ -129,10 +168,13 @@ const MAX_PAGE: usize = 500;
 /// `?limit=&offset=` for a node listing. Both optional; out-of-range values
 /// clamp rather than error, since a caller asking for more than the ceiling
 /// wants as much as it can have, not a rejection.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PageQuery {
+    /// Page size. Default 50, ceiling 500; out-of-range values clamp.
     #[serde(default)]
     limit: Option<usize>,
+    /// How many to skip, for the next page.
     #[serde(default)]
     offset: Option<usize>,
     /// Case-insensitive substring over name and excerpt.
@@ -145,6 +187,17 @@ pub struct PageQuery {
     q: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/{name}/nodes",
+    tag = INITIATIVES_TAG,
+    params(("name" = String, Path, description = "The initiative name, exactly as stored."), PageQuery),
+    responses(
+        (status = 200, description = "One page of the initiative's shared nodes, as briefs. `pull` one by id for the full record.", body = Vec<NodeBriefView>),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn list_nodes(
     _: Authenticated,
     State(store): State<Arc<Store>>,
@@ -178,6 +231,17 @@ async fn list_nodes(
     Ok(Json(views))
 }
 
+#[utoipa::path(
+    get,
+    path = "/{name}/edges",
+    tag = INITIATIVES_TAG,
+    params(("name" = String, Path, description = "The initiative name, exactly as stored.")),
+    responses(
+        (status = 200, description = "Every edge whose both endpoints are in the initiative.", body = Vec<EdgeView>),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn list_edges(
     _: Authenticated,
     State(store): State<Arc<Store>>,

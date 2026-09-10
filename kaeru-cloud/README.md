@@ -59,14 +59,27 @@ the curator-API caps.
 
 ## Endpoints
 
-All under a bearer-token gate except `/health`:
+All under a bearer-token gate except `/health`, `/openapi.json` and `/docs`.
+
+**The authoritative description is `/openapi.json`**, generated from the
+handlers themselves — browse it at `/docs`. The table below is a summary; if the
+two ever disagree, the generated one is right.
 
 | Method | Path                                   | Purpose                                   |
 |--------|----------------------------------------|-------------------------------------------|
-| GET    | `/health`                              | Liveness (unauthenticated).               |
-| POST   | `/api/v1/nodes`                        | Ingest a shared node (id preserved).      |
+| GET    | `/health`                              | Liveness and running kaeru-core version (unauthenticated). |
+| GET    | `/openapi.json`                        | The OpenAPI document (unauthenticated).   |
+| GET    | `/docs`                                | Swagger UI over it (unauthenticated).     |
+| POST   | `/api/v1/nodes`                        | Ingest a shared node — an upsert under the preserved id. |
 | GET    | `/api/v1/nodes/{id}`                   | Fetch a node's full record (soft-link / pull). |
-| GET    | `/api/v1/initiatives/{name}/nodes`     | List an initiative's shared nodes (discovery). |
+| DELETE | `/api/v1/nodes/{id}`                   | Retract a node — bi-temporal, idempotent. |
+| POST   | `/api/v1/edges`                        | Ingest an edge between shared nodes — an upsert. |
+| DELETE | `/api/v1/edges`                        | Retract an edge, by `src` / `dst` / `edge_type` in the body. |
+| GET    | `/api/v1/initiatives`                  | Every initiative, with live node counts.  |
+| GET    | `/api/v1/initiatives/{name}/nodes`     | Page through an initiative's shared nodes; `?q=` searches. |
+| GET    | `/api/v1/initiatives/{name}/edges`     | Edges whose both endpoints are in the initiative. |
+| POST   | `/api/v1/initiatives/{name}/rename`    | Rename team-wide.                         |
+| DELETE | `/api/v1/initiatives/{name}`           | Delete team-wide.                         |
 
 ## Auth & TLS
 

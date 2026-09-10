@@ -55,6 +55,12 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 tokio-util = "0.7"
 tokio-stream = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+# OpenAPI for kaeru-cloud (#70), derived from the handlers so it cannot drift
+# from them. `vendored` bundles the Swagger UI assets: without it the crate's
+# build script downloads them from GitHub, which breaks the offline build.
+utoipa = { version = "5.4", features = ["axum_extras"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 schemars = "1"

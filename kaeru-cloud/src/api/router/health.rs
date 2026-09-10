@@ -1,22 +1,44 @@
 //! Liveness probe. Unauthenticated, no substrate access — just confirms the
 //! service is up and reports the build version.
 
-use axum::routing::get;
-use axum::{Json, Router};
-use serde_json::{Value, json};
+use axum::Json;
+use serde::Serialize;
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::api::state::AppState;
 
-pub fn health_router() -> Router<AppState> {
-    Router::new().route("/", get(health))
+pub const HEALTH_TAG: &str = "health";
+
+pub fn health_router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new().routes(routes!(health))
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "service": "kaeru-cloud",
-        "core_version": kaeru_core::version(),
-    }))
+/// What `/health` answers. A local daemon reads `core_version` to warn when it
+/// and the cloud run different kaeru-core versions.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HealthView {
+    /// Always `"ok"` when the service answers at all.
+    pub status: String,
+    /// Always `"kaeru-cloud"`.
+    pub service: String,
+    /// The kaeru-core version this cloud was built from.
+    pub core_version: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/",
+    tag = HEALTH_TAG,
+    responses((status = 200, description = "The service is up.", body = HealthView))
+)]
+async fn health() -> Json<HealthView> {
+    Json(HealthView {
+        status: "ok".to_string(),
+        service: "kaeru-cloud".to_string(),
+        core_version: kaeru_core::version().to_string(),
+    })
 }
 
 #[cfg(test)]

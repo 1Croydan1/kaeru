@@ -30,6 +30,10 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// Every accepted spelling. The cloud's OpenAPI document takes its `tier`
+    /// enum from here, so the published schema cannot drift from `FromStr`.
+    pub const VALID: [&'static str; 2] = ["operational", "archival"];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Tier::Operational => "operational",
@@ -334,6 +338,11 @@ pub enum Layer {
 }
 
 impl Layer {
+    /// Every accepted spelling, in order of recall priority. The cloud's
+    /// OpenAPI document takes its `layer` enum from here, so the published
+    /// schema cannot drift from what `FromStr` accepts.
+    pub const VALID: [&'static str; 5] = ["core", "hot", "warm", "cold", "frozen"];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Layer::Core => "core",
@@ -537,6 +546,31 @@ mod vocab_tests {
                 EdgeType::from_str(v).is_ok(),
                 "advertised edge type `{v}` does not parse"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod vocabulary_tests {
+    use std::str::FromStr;
+
+    use super::{Layer, Tier};
+
+    /// `VALID` is what the cloud publishes as the schema's enum, so every entry
+    /// has to be something the parser actually accepts — and give back the
+    /// same spelling, or a client following the schema is told to send a value
+    /// the server stores differently.
+    #[test]
+    fn every_listed_tier_parses_and_round_trips() {
+        for v in Tier::VALID {
+            assert_eq!(Tier::from_str(v).expect(v).as_str(), v);
+        }
+    }
+
+    #[test]
+    fn every_listed_layer_parses_and_round_trips() {
+        for v in Layer::VALID {
+            assert_eq!(Layer::from_str(v).expect(v).as_str(), v);
         }
     }
 }

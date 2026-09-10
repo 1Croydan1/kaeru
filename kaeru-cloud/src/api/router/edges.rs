@@ -19,24 +19,29 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::post;
-use axum::{Json, Router};
 use kaeru_core::{EdgeType, Store, unlink, upsert_edge};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
+use crate::api::docs::ErrorBody;
 use crate::api::extractors::Authenticated;
 use crate::api::state::AppState;
 use crate::errors::ApiError;
 
-pub fn edges_router() -> Router<AppState> {
-    Router::new().route("/", post(ingest_edge).delete(retract_edge))
+pub const EDGES_TAG: &str = "edges";
+
+pub fn edges_router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new().routes(routes!(ingest_edge, retract_edge))
 }
 
 /// An edge pushed up from a local vault. `src` / `dst` are the (preserved)
 /// node UUIDv7s — both must already be shared so the edge resolves.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct EdgeIngestReq {
     pub src: String,
     pub dst: String,
@@ -45,6 +50,7 @@ pub struct EdgeIngestReq {
     /// across share / pull; re-posting an edge with a new weight is also the
     /// cloud-side edit handle. Defaults to `1.0` when omitted.
     #[serde(default = "default_weight")]
+    #[schema(default = 1.0, minimum = 0.0, maximum = 1.0)]
     pub weight: f64,
 }
 
@@ -52,7 +58,7 @@ fn default_weight() -> f64 {
     1.0
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct EdgeView {
     pub src: String,
     pub dst: String,
@@ -60,6 +66,18 @@ pub struct EdgeView {
     pub weight: f64,
 }
 
+#[utoipa::path(
+    post,
+    path = "/",
+    tag = EDGES_TAG,
+    request_body = EdgeIngestReq,
+    responses(
+        (status = 201, description = "Stored. Re-posting the same triple is an upsert — the way to change a weight.", body = EdgeView),
+        (status = 400, description = "Unknown edge_type, or an empty src / dst.", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn ingest_edge(
     _: Authenticated,
     State(store): State<Arc<Store>>,
@@ -89,7 +107,7 @@ async fn ingest_edge(
 /// Which edge to retract. The triple is the edge's identity — the `edge`
 /// relation is keyed by `{src, dst, edge_type, validity}`, so nothing else is
 /// needed to name one.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct EdgeRetractReq {
     pub src: String,
     pub dst: String,
@@ -113,6 +131,18 @@ pub struct EdgeRetractReq {
 /// second it was ingested carries an assert and a retract that cannot be
 /// ordered, and may still read until the next write. Retrying a second later
 /// settles it.
+#[utoipa::path(
+    delete,
+    path = "/",
+    tag = EDGES_TAG,
+    request_body = EdgeRetractReq,
+    responses(
+        (status = 204, description = "Retracted — or already gone; the call is idempotent."),
+        (status = 400, description = "Unknown edge_type, or an empty src / dst.", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token.", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 async fn retract_edge(
     _: Authenticated,
     State(store): State<Arc<Store>>,
