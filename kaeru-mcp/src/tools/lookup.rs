@@ -1,6 +1,8 @@
 //! Read-side tools: `recall`, `drill`, `neighbours`, `trace`, `search`,
 //! `ideas`, `outcomes`, `tagged`, `between`.
 
+use std::collections::BTreeMap;
+
 use kaeru_core::Store;
 use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
@@ -100,28 +102,86 @@ pub fn search(
     limit: usize,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    with_initiative(store, initiative, || {
-        let hits = kaeru_core::fuzzy_recall(store, query, limit).map_err(to_mcp)?;
-        if hits.is_empty() {
-            return Ok(text(&format!("(no matches){}", search_empty_hint(query))));
+    let hits = with_initiative(store, initiative, || {
+        kaeru_core::fuzzy_recall(store, query, limit).map_err(to_mcp)
+    })?;
+    if hits.is_empty() {
+        return Ok(text(&search_miss(store, query, limit, initiative)));
+    }
+    let mut out = format!("matches ({}):\n", hits.len());
+    let mut any_truncated = false;
+    for b in &hits {
+        out.push_str(&format!("  - {} ({}) — {}\n", b.name, b.node_type, b.id));
+        if let Some(e) = &b.body_excerpt {
+            out.push_str(&format!("    {e}\n"));
+            any_truncated |= body_truncated(Some(e));
         }
-        let mut out = format!("matches ({}):\n", hits.len());
-        let mut any_truncated = false;
-        for b in &hits {
-            out.push_str(&format!("  - {} ({}) — {}\n", b.name, b.node_type, b.id));
-            if let Some(e) = &b.body_excerpt {
-                out.push_str(&format!("    {e}\n"));
-                any_truncated |= body_truncated(Some(e));
-            }
-        }
-        if any_truncated {
-            out.push_str(AT_FULLTEXT_HINT_MANY);
-        }
-        if let Some(top) = hits.first() {
-            out.push_str(&search_deepen_hint(&top.name));
-        }
-        Ok(text(&out))
+    }
+    if any_truncated {
+        out.push_str(AT_FULLTEXT_HINT_MANY);
+    }
+    if let Some(top) = hits.first() {
+        out.push_str(&search_deepen_hint(&top.name));
+    }
+    Ok(text(&out))
+}
+
+/// What a `search` that found nothing says — and, when it was scoped, whether
+/// the same query hits in other initiatives.
+///
+/// A scoped miss used to say `(no matches)` and suggest widening the prefix,
+/// while an unscoped search of the same words would have hit. That is the
+/// "called and did not find" class the usage audits keep landing on, in its
+/// cheapest form: one real miss in #89 was a VPN answer that lived in another
+/// initiative entirely, with the agent scoped to its own. Initiatives fragment
+/// (#86), so a scoped miss is the single most likely place for knowledge to be
+/// hiding one argument away.
+///
+/// The unscoped search runs AFTER the scoped one has returned, never inside
+/// it: `Store::scoped` holds a non-reentrant mutex, and a nested scoped call
+/// would deadlock the calling thread for good.
+fn search_miss(store: &Store, query: &str, limit: usize, initiative: Option<&str>) -> String {
+    let Some(scope) = initiative else {
+        return format!("(no matches){}", search_empty_hint(query));
+    };
+    // Best-effort: a failure here must not turn a clean miss into an error.
+    let elsewhere = with_initiative(store, None, || {
+        kaeru_core::fuzzy_recall(store, query, limit).map_err(to_mcp)
     })
+    .unwrap_or_default();
+    if elsewhere.is_empty() {
+        return format!(
+            "(no matches) in `{scope}`, nor in any other initiative{}",
+            search_empty_hint(query)
+        );
+    }
+
+    let mut by_initiative: BTreeMap<String, usize> = BTreeMap::new();
+    for hit in &elsewhere {
+        let homes = kaeru_core::initiatives_of_node(store, &hit.id).unwrap_or_default();
+        if homes.is_empty() {
+            *by_initiative
+                .entry("(no initiative)".to_string())
+                .or_default() += 1;
+        }
+        for home in homes {
+            *by_initiative.entry(home).or_default() += 1;
+        }
+    }
+    let spread = by_initiative
+        .iter()
+        .map(|(name, n)| format!("{n} in `{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let top = &elsewhere[0];
+    format!(
+        "(no matches) in `{scope}` — but {} match elsewhere: {spread}.\n\
+         ↳ top hit: `{}` — read it with `at {}`. `search` without `initiative` lists them \
+         all; if these are one project split across names, `merge_initiative` joins them.",
+        elsewhere.len(),
+        top.name,
+        top.name
+    )
 }
 
 pub fn ideas(store: &Store, initiative: Option<&str>) -> Result<CallToolResult, McpError> {
@@ -559,5 +619,106 @@ mod tests {
             !by_recall.contains("(not found)"),
             "and recall agrees with it: {by_recall}"
         );
+    }
+
+    /// Writes `name` into `initiative` without disturbing the caller's scope
+    /// for anything else.
+    fn write_in(store: &Store, initiative: &str, name: &str, body: &str) -> String {
+        store.use_initiative(initiative);
+        write(store, name, body)
+    }
+
+    /// The miss #89 recorded in the wild: the answer lived in another
+    /// initiative, the agent was scoped to its own, and `search` said
+    /// `(no matches)` while an unscoped search of the same words would have
+    /// hit. A scoped miss now says where the words DO match.
+    #[test]
+    fn a_scoped_miss_names_the_initiatives_where_the_query_hits() {
+        let store = Store::open_in_memory().expect("open");
+        write_in(
+            &store,
+            "shadowrocket",
+            "vpn-on-the-router",
+            "single ip solved by a router vpn",
+        );
+        write_in(
+            &store,
+            "home-lab",
+            "router-vpn-notes",
+            "the router vpn config lives here",
+        );
+        write_in(&store, "practicum", "unrelated", "nothing about networking");
+
+        let out = text_of(search(&store, "router", 10, Some("practicum")).unwrap());
+        assert!(out.starts_with("(no matches)"), "still a miss here: {out}");
+        assert!(
+            out.contains("in `practicum`"),
+            "names the scope it missed in: {out}"
+        );
+        assert!(out.contains("2 match elsewhere"), "counts the hits: {out}");
+        assert!(out.contains("1 in `shadowrocket`"), "{out}");
+        assert!(out.contains("1 in `home-lab`"), "{out}");
+        assert!(
+            out.contains("`at "),
+            "hands over a hit to read directly: {out}"
+        );
+        assert!(
+            out.contains("merge_initiative"),
+            "and names the repair: {out}"
+        );
+    }
+
+    /// When the words match nowhere, it says so plainly — and still hands back
+    /// the widenings, because that is the moment an agent gives up.
+    #[test]
+    fn a_miss_everywhere_says_so_and_keeps_the_widenings() {
+        let store = Store::open_in_memory().expect("open");
+        write_in(&store, "a", "one", "alpha body");
+        write_in(&store, "b", "two", "beta body");
+
+        let out = text_of(search(&store, "zzzznotthere", 10, Some("a")).unwrap());
+        assert!(out.starts_with("(no matches)"), "{out}");
+        assert!(out.contains("nor in any other initiative"), "{out}");
+        assert!(
+            out.contains("`search \"zzzznotthere*\"`"),
+            "widenings kept: {out}"
+        );
+    }
+
+    /// An unscoped search already looked everywhere, so a miss there has
+    /// nothing to add about other initiatives.
+    #[test]
+    fn an_unscoped_miss_is_unchanged() {
+        let store = Store::open_in_memory().expect("open");
+        write_in(&store, "a", "one", "alpha body");
+
+        let out = text_of(search(&store, "zzzznotthere", 10, None).unwrap());
+        assert!(out.starts_with("(no matches)"), "{out}");
+        assert!(
+            !out.contains("elsewhere"),
+            "nothing to report beyond: {out}"
+        );
+        assert!(!out.contains("any other initiative"), "{out}");
+    }
+
+    /// The cross-initiative lookup runs after the scoped search returns, never
+    /// inside it — `Store::scoped` is a non-reentrant mutex. If that ever
+    /// regresses to a nested call this test hangs rather than passes, which is
+    /// the point of having it.
+    #[test]
+    fn a_scoped_miss_does_not_deadlock_the_store() {
+        let store = Store::open_in_memory().expect("open");
+        write_in(
+            &store,
+            "elsewhere",
+            "the-answer",
+            "certificate renewal breaks on tls",
+        );
+
+        let out = text_of(search(&store, "certificate", 10, Some("here")).unwrap());
+        assert!(out.contains("1 match elsewhere"), "{out}");
+        // And the store is still usable afterwards.
+        let again = text_of(search(&store, "certificate", 10, Some("elsewhere")).unwrap());
+        assert!(again.starts_with("matches (1)"), "{again}");
     }
 }

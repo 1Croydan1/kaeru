@@ -157,6 +157,7 @@ kaeru-mcp                                            # foreground, Ctrl-C to sto
 Then point your agent at it:
 
 - **Claude Code**: `claude mcp add --transport http kaeru http://127.0.0.1:9876/mcp` — see `skills/kaeru-skill/` for the portable system-prompt rules.
+- **Check memory before asking** (Claude Code and Codex): `contrib/hooks/kaeru-first/` is a harness hook for the moment the agent is about to ask the user something — if kaeru was not read recently, it sends the agent to search first, once, and then asks it to capture the user's answer. Stdlib Python, fails open. See its README.
 - **Opencode**: `bash contrib/opencode/install-opencode.sh` — wires the daemon, drops `AGENTS.kaeru.md` rules into `~/.config/opencode/`, and installs `/kaeru` / `/lesson` / `/recall` slash commands. Designed to coexist with your existing OSS-model provider config (Qwen / DeepSeek / GLM / Ollama). See `contrib/opencode/README.md`.
 - **Cursor and other runtimes**: paste the body of `skills/kaeru-skill/SKILL.md` into your agent's rules / system-prompt section. For MCP-aware clients the daemon URL above works directly.
 
