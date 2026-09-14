@@ -1,4 +1,7 @@
 /target
+# Release builds run in a container and write here as root (#70-era fix:
+# the Linux binary is built natively, not cross-compiled).
+/target-linux-release
 /dist
 /.kaeru-vault/
 *.swp

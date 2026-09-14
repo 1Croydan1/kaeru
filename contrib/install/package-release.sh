@@ -32,10 +32,23 @@ set -euo pipefail
 TAG="${1:-}"
 [[ -n "$TAG" ]] || { echo "usage: $0 <tag, e.g. v0.1.0>" >&2; exit 1; }
 
-TARGETS=(
+# Everything that ships, for packaging / checksums / server.json.
+ALL_TARGETS=(
     x86_64-unknown-linux-gnu
     aarch64-apple-darwin
 )
+
+# Only darwin is cross-compiled. linux-gnu is built NATIVELY inside a
+# container — see `build_linux_in_container`.
+TARGETS=(
+    aarch64-apple-darwin
+)
+
+# Debian 12. Chosen for the glibc floor its toolchain produces (2.34), which
+# covers Ubuntu 22.04 and everything newer. Bullseye would floor at 2.31 but
+# cannot build `zstd-sys` with its compiler.
+LINUX_IMAGE="${KAERU_LINUX_IMAGE:-rust:bookworm}"
+LINUX_TARGET=x86_64-unknown-linux-gnu
 
 # Resolve SDKROOT for darwin cross-compile. zigbuild uses zig clang for the
 # linker, but darwin frameworks (Security, CoreFoundation, …) live in the
@@ -77,42 +90,21 @@ DIST="$ROOT/dist"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-for target in "${TARGETS[@]}"; do
-    echo "==> building $target"
-
-    # darwin needs `-p kaeru-mcp`: without it cargo unifies features across
-    # the workspace, `kaeru-rig`'s rig-core pulls in aws-lc-rs, and aws-lc's
-    # assembly makes zig's Mach-O linker fail with no message at all — only
-    # "exit status 1" and an empty note. Scoped to the package we ship, that
-    # dependency is not in the graph and kaeru-mcp reaches rustls via `ring`.
-    # It is not elegant, and the alternative is discovering it again next
-    # release.
-    #
-    # linux-gnu builds workspace-wide (no scope) and links cleanly against the
-    # GNU C++ ABI that RocksDB is compiled for. The old linux-musl target is
-    # gone on purpose: even once it linked, the static-musl binary segfaulted
-    # opening an EXISTING vault — musl's small default pthread stack overflows
-    # in RocksDB recovery, while a fresh vault (no recovery) ran fine. The
-    # Linux prebuilt is glibc/gnu now; it needs a glibc host (not Alpine/musl).
-    scope=()
-    [[ "$target" == aarch64-apple-darwin ]] && scope=(-p kaeru-mcp)
-
-    cargo zigbuild --release --target "$target" "${scope[@]}" --bin kaeru-mcp
-
+# Packages one built binary: a tarball, and the same binary as an MCP Bundle.
+#
+# A .mcpb is a zip carrying the server plus a manifest, which is what lets a
+# client install kaeru with nothing to download and nothing to build. The
+# manifest runs the binary with `--stdio`, never bare: bare would start a second
+# daemon over whichever one already owns the vault, and the substrate is
+# single-writer — the loser fails on the RocksDB lock.
+package_target() {
+    local target="$1" binary="$2" stage archive bundle
     stage=$(mktemp -d)
-    cp "target/$target/release/kaeru-mcp" "$stage/"
+    cp "$binary" "$stage/kaeru-mcp"
 
     archive="kaeru-${TAG}-${target}.tar.gz"
     tar -C "$stage" -czf "$DIST/$archive" kaeru-mcp
 
-    # …and the same binary as an MCP Bundle. A .mcpb is a zip carrying the
-    # server plus a manifest, which is what lets a client install kaeru with
-    # nothing to download and nothing to build.
-    #
-    # The manifest runs the binary with `--stdio`, never bare. Bare would start
-    # a second daemon over whichever one already owns the vault, and the
-    # substrate is single-writer — the loser fails on the RocksDB lock. With
-    # `--stdio` each client gets a relay of its own and the daemon stays one.
     bundle="kaeru-mcp-${TAG}-${target}.mcpb"
     mkdir -p "$stage/server"
     mv "$stage/kaeru-mcp" "$stage/server/kaeru-mcp"
@@ -123,6 +115,81 @@ for target in "${TARGETS[@]}"; do
 
     echo "    -> dist/$archive"
     echo "    -> dist/$bundle"
+}
+
+# Builds the Linux binary natively, in a container, and NOT with zigbuild.
+#
+# This is the fix for a shipped regression, and the reasoning is worth keeping.
+# 0.7.1 and 0.7.2 published a linux-gnu binary cross-compiled by cargo-zigbuild.
+# It SIGSEGVs on startup when opening a vault that already has content — a NULL
+# write deep in RocksDB's C++, no Rust panic, before `substrate ready`. A fresh
+# vault opens fine, which is what made it survive testing. Verified on one
+# machine, one vault: the published 0.7.1/0.7.2 binaries crash where a native
+# build of the very same commit opens the vault and serves.
+#
+# The same symptom was seen once before and mis-attributed. The comment this
+# replaces blamed "musl's small default pthread stack" for a segfault opening an
+# existing vault, and the cure was to switch musl → gnu — while keeping the
+# cross-compiler. The crash came back with glibc, so the cross-compiler was
+# always the common factor, not the libc.
+#
+# Native build, old distro, no cross-linking of RocksDB's C++. The container is
+# the same shape the Windows build already uses.
+build_linux_in_container() {
+    echo "==> building $LINUX_TARGET natively in $LINUX_IMAGE"
+    local out="target-linux-release/release/kaeru-mcp"
+    local before after started
+    before=$(stat -c %Y "$out" 2>/dev/null || echo 0)
+    started=$(date +%s)
+
+    docker run --rm --network host \
+        -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" \
+        -e http_proxy="${http_proxy:-}" -e https_proxy="${https_proxy:-}" \
+        -e NO_PROXY="${NO_PROXY:-localhost,127.0.0.1}" \
+        -e CARGO_TERM_COLOR=never \
+        -v "$ROOT:/io" -v "$HOME/.cargo/registry:/root/.cargo/registry" \
+        -w /io \
+        "$LINUX_IMAGE" \
+        bash -c 'apt-get update -qq && apt-get install -y -qq clang libclang-dev >/dev/null &&
+                 cargo build --release --target-dir /io/target-linux-release -p kaeru-mcp --bin kaeru-mcp'
+
+    [[ -f "$out" ]] || { echo "!!  $out does not exist — the build produced nothing" >&2; exit 1; }
+    after=$(stat -c %Y "$out")
+    # A container that fails without stopping the script would otherwise ship
+    # the previous release's binary. The Windows build learned this first.
+    if [[ "$after" == "$before" || "$after" -lt "$started" ]]; then
+        echo "!!  $out was not rebuilt by this run — left over from an earlier build." >&2
+        echo "!!  Something failed inside the container. Do NOT ship this." >&2
+        exit 1
+    fi
+
+    # The glibc floor is a property of the toolchain, not a promise — read it
+    # off the binary so the release notes can state the truth.
+    local floor
+    floor=$(objdump -T "$out" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
+    echo "    glibc floor: ${floor#GLIBC_}"
+
+    package_target "$LINUX_TARGET" "$out"
+}
+
+build_linux_in_container
+
+for target in "${TARGETS[@]}"; do
+    echo "==> building $target"
+
+    # darwin needs `-p kaeru-mcp`: without it cargo unifies features across
+    # the workspace, `kaeru-rig`'s rig-core pulls in aws-lc-rs, and aws-lc's
+    # assembly makes zig's Mach-O linker fail with no message at all — only
+    # "exit status 1" and an empty note. Scoped to the package we ship, that
+    # dependency is not in the graph and kaeru-mcp reaches rustls via `ring`.
+    #
+    # NOTE: this target is still CROSS-COMPILED, which is what broke the Linux
+    # binary in 0.7.1/0.7.2 (see `build_linux_in_container`). Nobody has opened
+    # an existing vault with a released darwin build and confirmed it survives.
+    # Until someone does, treat it as unverified.
+    cargo zigbuild --release --target "$target" -p kaeru-mcp --bin kaeru-mcp
+
+    package_target "$target" "target/$target/release/kaeru-mcp"
 done
 
 echo "==> SHA256SUMS"
@@ -136,7 +203,7 @@ echo "==> SHA256SUMS"
 echo "==> server.json"
 REL="https://github.com/LamantinAI/kaeru/releases/download/$TAG"
 packages=""
-for target in "${TARGETS[@]}"; do
+for target in "${ALL_TARGETS[@]}"; do
     bundle="kaeru-mcp-${TAG}-${target}.mcpb"
     sum=$(cd "$DIST" && sha256sum "$bundle" | cut -d' ' -f1)
     [[ -n "$packages" ]] && packages="$packages,"
