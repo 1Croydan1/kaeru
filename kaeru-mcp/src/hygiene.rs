@@ -45,7 +45,7 @@ pub struct HygieneScheduler {
     in_flight: Arc<Mutex<HashSet<String>>>,
     cancel: CancellationToken,
     /// On by default; set `KAERU_MCP_HYGIENE_ENABLE=0` to disable, which makes
-    /// every trigger a no-op. It was opt-in until 0.8.0, on the reasoning that
+    /// every trigger a no-op. It was opt-in until 0.7.3, on the reasoning that
     /// a first sweep should be asked for — but off also silently disabled the
     /// fixes that depend on a pass ever running, and hygiene is the one part
     /// of the product that demonstrably works without being called.

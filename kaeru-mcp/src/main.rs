@@ -453,7 +453,7 @@ async fn normalize_mcp_accept(
 /// Whether background hygiene runs, from `KAERU_MCP_HYGIENE_ENABLE`.
 ///
 /// Unset means ON. The variable exists to turn it OFF, which is the inverse of
-/// what it meant before 0.8.0 — so it is a named function with tests rather
+/// what it meant before 0.7.3 — so it is a named function with tests rather
 /// than an inline `matches!`, because silently flipping the sense of an env var
 /// a vault already sets is exactly the kind of thing that should fail a test
 /// if anyone reverses it again.
