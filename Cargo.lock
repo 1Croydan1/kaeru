@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "kaeru-cloud"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "axum",
  "config",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "kaeru-core"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "chrono",
  "config",
@@ -1899,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "kaeru-mcp"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "axum",
  "chrono",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "kaeru-rig"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "kaeru-core",
  "reqwest 0.12.28",
