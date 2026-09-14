@@ -1,6 +1,6 @@
 /target
-# Release builds run in a container and write here as root (#70-era fix:
-# the Linux binary is built natively, not cross-compiled).
+# The Linux release build runs in a container (natively, not cross-compiled)
+# and writes here as root.
 /target-linux-release
 /dist
 /.kaeru-vault/
