@@ -359,10 +359,24 @@ class StopShapeTests(HookCase):
         self.assertEqual((out or {}).get("decision"), "block")
         self.assertEqual(self.decisions()[-1]["shape"], "offer")
 
-    def test_an_enumerated_choice_blocks(self):
-        out = self.run_hook(self.stop("Paths for the provider:\n1. Keep\n2. Switch\n3. Postpone\nWhich do we take, the first or the second"))
+    def test_a_formatted_status_report_is_not_an_ask(self):
+        """The first live firing of this hook was a false positive on exactly this:
+        a report with bold bullets and an "or" somewhere in its tail."""
+        report = ("Installed in both places.\n"
+                  "- **The log is empty.** Nothing ended in a question or a request yet.\n"
+                  "- **The provider side is untested.** It shows up after a real session.\n"
+                  "Next: the provider plan gets checked after the first run.")
+        self.assertIsNone(self.run_hook(self.stop(report)))
+        self.assertEqual(self.decisions(), [])
+
+    def test_a_numbered_next_step_is_not_an_ask(self):
+        self.assertIsNone(self.run_hook(self.stop("Done with the provider.\n1. Keep\n2. Switch\nNext step: open the PR for the provider.")))
+        self.assertEqual(self.decisions(), [])
+
+    def test_an_enumerated_choice_with_a_question_is_still_caught(self):
+        out = self.run_hook(self.stop("Paths for the provider:\n1. Keep\n2. Switch\n3. Postpone\nWhich do we take?"))
         self.assertEqual((out or {}).get("decision"), "block")
-        self.assertEqual(self.decisions()[-1]["shape"], "options")
+        self.assertEqual(self.decisions()[-1]["shape"], "q_last")
 
     def test_a_statement_passes(self):
         self.assertIsNone(self.run_hook(self.stop("The provider is configured and the suite is green.")))
@@ -492,6 +506,14 @@ class HelperTests(unittest.TestCase):
 
     def test_stem_survives_an_inflection(self):
         self.assertIn(kf.stem("providers"), "provider-switch-note")
+
+    def test_a_bare_question_under_a_numbered_list_borrows_its_subject(self):
+        shape, asking = kf.asking_shape("Paths for the provider:\n1. Keep\n2. Switch\nWhich do we take?")
+        self.assertEqual(shape, "q_last")
+        self.assertIn("provider", kf.terms_of(asking))
+        # …but bold bullets are report formatting, and lend nothing.
+        _, asking = kf.asking_shape("- **Provider:** kept\n- **Plan:** unchanged\nWhat next?")
+        self.assertEqual(kf.terms_of(asking), [])
 
     def test_only_the_last_line_counts_for_q_last(self):
         self.assertEqual(kf.asking_shape("A question?\nAn answer.")[0], "q_any")

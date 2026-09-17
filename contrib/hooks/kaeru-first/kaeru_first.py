@@ -9,13 +9,15 @@ that moment on a timer — "no kaeru read in the window → deny once".
 Usage audit 5 changed two things about it.
 
 First, **the moment is wider than a question mark.** Over 2,608 turns where the
-agent stopped and waited for the human, 1,461 were an ask in some form, and
-only 205 of those (14%) were an `AskUserQuestion` or a reply whose last line
-ends in `?` — the two shapes the first version could see. The largest class,
+agent stopped and waited for the human, about a thousand were an ask — and
+only 205 of those were an `AskUserQuestion` or a reply whose last line ends in
+`?`, the two shapes the first version could see. The largest class it missed,
 732, was an imperative hand-off: "say «fix it»", "I need your answer about the
 provider", "send the report over". The user's "it's in kaeru" replies landed
-on the invisible shapes five times more often than on the visible ones. So
-`Stop` now looks at the whole tail of the reply, not its last character.
+on the invisible shapes far more often than on the visible ones. So `Stop` now
+looks at the whole tail of the reply, not its last character. (A fourth shape,
+the enumerated list, was counted at first and then dropped: see
+`asking_shape` — it turned out to be formatting, not asking.)
 
 Second, **a timer is the wrong gate for a wider net, and so is a lexical one.**
 Half of those hand-offs are procedural ("write «done»") and memory cannot
@@ -306,8 +308,6 @@ EN = {
         "want me to", "shall i", r"i can\b", "happy to", "if you want", "if you'd like", r"i could\b",
         "would you like", "say the word",
     ],
-    "choice_cue": [r"or\b", "which", "option", "choose", "pick", "next:"],
-    "option_line": [r"option\s*\w", r"options?:"],
     # What the human says when the agent should have looked first.
     "miss": [
         r"(?:check|look in|search|read|it'?s in|that'?s in) (?:kaeru|memory|your notes)",
@@ -360,8 +360,6 @@ def build(lex: dict[str, list[str]]) -> dict:
         "yesno_label": re.compile(r"^(?:\*\*)?" + _alt(lex["yesno_label"]), flags),
         "imperative": re.compile(r"\b" + _alt(lex["imperative"]) + r"\b", flags),
         "offer": re.compile(r"^(?:[-*•>]\s*)?(?:\*\*)?" + _alt(lex["offer"]), flags),
-        "choice_cue": re.compile(r"\b" + _alt(lex["choice_cue"]), flags),
-        "option_line": re.compile(r"^\s*(?:\d+[.)]|\w[.)]|[-•*]\s+\*\*|" + _alt(lex["option_line"]) + ")", flags),
         "miss": re.compile(_alt(lex["miss"]), flags),
         "complaint": re.compile(_alt(lex["complaint"]), flags),
         "capture": re.compile(_alt(lex["capture"]), flags),
@@ -376,7 +374,7 @@ except re.error:
 
 STOP = LEX["stop"]
 QUOTED_GO, CONFIRM_STEM, YESNO_LABEL = LEX["quoted_go"], LEX["confirm_stem"], LEX["yesno_label"]
-IMPERATIVE, OFFER, CHOICE_CUE, OPTION_LINE = LEX["imperative"], LEX["offer"], LEX["choice_cue"], LEX["option_line"]
+IMPERATIVE, OFFER = LEX["imperative"], LEX["offer"]
 MISS_MARKERS, COMPLAINT_MARKERS, CAPTURE_MARKERS = LEX["miss"], LEX["complaint"], LEX["capture"]
 QMARK = ("?", "？")
 
@@ -427,12 +425,31 @@ def ends_in_question(text: str | None) -> bool:
     return bool(lines) and strip_md(lines[-1]).endswith(QMARK)
 
 
+NUMBERED = re.compile(r"^\s*(?:\d+[.)]|\w[.)])\s")
+
+
+def with_choice_context(tail: list[str], idx: int) -> str:
+    """The question line, plus the numbered list it refers to when one sits right above it.
+
+    "Which do we take?" names nothing — every word of it is a stopword. The
+    subject is in the list above and the line that introduces it, so those are
+    what gets searched. Only numbered lines count: bold bullets are how a
+    status report is formatted, not how a choice is offered.
+    """
+    j = idx
+    while j - 1 >= 0 and NUMBERED.match(tail[j - 1]):
+        j -= 1
+    if idx - j >= 2:
+        return " ".join(tail[max(0, j - 1): idx + 1])
+    return tail[idx]
+
+
 def asking_shape(text: str | None) -> tuple[str, str] | None:
     """Does this reply hand the turn to the human, and how?
 
     Returns (shape, asking_text) or None. Looks at the last eight non-empty
     lines: the question mark anywhere, an imperative addressed to the user,
-    an offer waiting for a yes, or an enumerated choice with a choice cue.
+    or an offer waiting for a yes.
     """
     if not text:
         return None
@@ -441,19 +458,22 @@ def asking_shape(text: str | None) -> tuple[str, str] | None:
         return None
     tail = lines[-8:]
     if strip_md(tail[-1]).endswith(QMARK):
-        return "q_last", tail[-1]
-    q_lines = [ln for ln in tail if strip_md(ln).endswith(QMARK)]
-    if q_lines:
-        return "q_any", " ".join(q_lines)
+        return "q_last", with_choice_context(tail, len(tail) - 1)
+    q_idx = [i for i, ln in enumerate(tail) if strip_md(ln).endswith(QMARK)]
+    if q_idx:
+        return "q_any", " ".join(with_choice_context(tail, i) for i in q_idx)
     imp = [ln for ln in tail if IMPERATIVE.search(ln)]
     if imp:
         return "imperative", " ".join(imp)
     off = [ln for ln in tail if OFFER.search(ln)]
     if off:
         return "offer", " ".join(off)
-    opt = [ln for ln in tail if OPTION_LINE.match(ln)]
-    if len(opt) >= 2 and any(CHOICE_CUE.search(ln) for ln in tail):
-        return "options", " ".join(tail)
+    # An enumerated list is NOT a shape of its own. It was tried: over the same
+    # corpus, 133 replies matched "two option-like lines plus a choice cue", and
+    # on inspection none of a sample of twenty was a question memory could
+    # answer — they were status reports with bold bullets and "next: do X"
+    # hand-offs. A real choice comes with a question mark or an imperative and
+    # is caught above; what is left over is formatting.
     return None
 
 

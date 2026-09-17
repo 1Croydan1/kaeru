@@ -17,14 +17,24 @@ with a search recipe.
 Usage audit 5 replayed it over every turn where the agent stopped and waited
 for the human — 2,608 of them in one user's logs — and changed two things.
 
-**The moment is wider than a question mark.** 1,461 of those turns were an
-ask in some form. Only 205 (14%) were an `AskUserQuestion` or a reply whose
+**The moment is wider than a question mark.** About a thousand of those turns
+were an ask in some form. Only 205 were an `AskUserQuestion` or a reply whose
 last line ends in `?` — the two shapes the first version could see. The
-largest class, 732, was an imperative hand-off: *"say «fix it»"*, *"I need
-your answer about the provider"*, *"send the report over"*. Then enumerated choices (420),
-a question above the last line (72), an offer without a question mark (32).
-The human's *"it's in kaeru"* replies landed on the invisible shapes five
-times more often than on the visible ones: 109 against 20.
+largest class it missed, 732, was an imperative hand-off: *"say «fix it»"*,
+*"I need your answer about the provider"*, *"send the report over"*. Then a
+question above the last line (72) and an offer without a question mark (32).
+The human's *"it's in kaeru"* replies landed on the invisible shapes far more
+often than on the visible ones.
+
+A fourth shape was counted at first and then dropped, and the correction is
+worth keeping: an **enumerated list** with a "choice cue" matched 133 replies,
+and on inspection none of a sample of twenty was a question memory could
+answer — they were status reports with bold bullets and *"next: do X"*
+hand-offs. The hook's first live firing was a false positive on exactly that.
+A real choice comes with a question mark or an imperative and is caught by
+those; what is left over is formatting. The same caution applies to every
+count above: the corpus is "turns the human replied to", and the human
+eventually replies to every final turn, so these are upper bounds on asking.
 
 **A timer is the wrong gate for a wider net — and so is a lexical one.** Half
 of those hand-offs are procedural — *"write «done»"* — and memory cannot
@@ -129,7 +139,7 @@ language needs a file, not a fork:
   "stop":        ["…function words and procedural vocabulary…"],
   "quoted_go":   ["…verbs that precede a quoted go-word…"],
   "confirm_stem":["…"], "yesno_label": ["…"],
-  "imperative":  ["…"], "offer": ["…"], "choice_cue": ["…"], "option_line": ["…"],
+  "imperative":  ["…"], "offer": ["…"],
   "miss":        ["…regex fragments…"], "complaint": ["…"], "capture": ["…"]
 }
 ```
