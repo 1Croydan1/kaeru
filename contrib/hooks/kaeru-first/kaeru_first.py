@@ -317,6 +317,14 @@ EN = {
         "want me to", "shall i", "if you want", "if you'd like", "would you like", "say the word",
         "i can also", "i could also", r"happy to (?:do|take|run|write|fix|add|draft|dig|look|help)",
     ],
+    # A line that opens like this hands the human an ACTION — "Next: run the
+    # tests", "Next step: open the PR" — not a question. Memory cannot open a
+    # PR for anyone. Agents that close every reply with a next action (a common
+    # house style) would otherwise be blocked on every single turn.
+    "next_step": [
+        r"next\s*:", "next step", "next action", r"now\s*:", r"then\s*:", "to do now", r"your move\s*:",
+        r"action\s*:", r"do this\s*:",
+    ],
     # A word that turns a confirmation into a choice.
     "alternative": [r"or\b", "versus", r"vs\b", "either"],
     # What the human says when the agent should have looked first.
@@ -378,6 +386,7 @@ def build(lex: dict[str, list[str]]) -> dict:
         "imperative": re.compile(r"\b" + _alt(lex["imperative"]) + r"\b", flags),
         "offer": re.compile(r"^(?:[-*•>]\s*)?(?:\*\*)?" + _alt(lex["offer"]), flags),
         "alternative": re.compile(r"\b" + _alt(lex["alternative"]), flags),
+        "next_step": re.compile(r"^[\s>#*_\-•\d.)]*" + _alt(lex["next_step"]), flags),
         "miss": re.compile(_alt(lex["miss"]), flags),
         "complaint": re.compile(_alt(lex["complaint"]), flags),
         "capture": re.compile(_alt(lex["capture"]), flags),
@@ -392,7 +401,7 @@ except re.error:
 
 STOP = LEX["stop"]
 QUOTED_GO, CONFIRM_STEM, YESNO_LABEL = LEX["quoted_go"], LEX["confirm_stem"], LEX["yesno_label"]
-IMPERATIVE, OFFER, ALTERNATIVE = LEX["imperative"], LEX["offer"], LEX["alternative"]
+IMPERATIVE, OFFER, ALTERNATIVE, NEXT_STEP = LEX["imperative"], LEX["offer"], LEX["alternative"], LEX["next_step"]
 MISS_MARKERS, COMPLAINT_MARKERS, CAPTURE_MARKERS = LEX["miss"], LEX["complaint"], LEX["capture"]
 QMARK = ("?", "？")
 
@@ -504,10 +513,12 @@ def asking_shape(text: str | None) -> tuple[str, str] | None:
     q_idx = [i for i, ln in enumerate(tail) if strip_md(used(ln)).endswith(QMARK)]
     if q_idx:
         return "q_any", " ".join(with_choice_context(tail, i) for i in q_idx)
-    imp = [ln for ln in tail if IMPERATIVE.search(used(ln))]
+    # "Next: open a session and give it the brief" tells the human what to DO;
+    # it asks for nothing memory could hold. Only a question mark overrides that.
+    imp = [ln for ln in tail if IMPERATIVE.search(used(ln)) and not NEXT_STEP.match(ln)]
     if imp:
         return "imperative", " ".join(imp)
-    off = [ln for ln in tail if OFFER.search(used(ln))]
+    off = [ln for ln in tail if OFFER.search(used(ln)) and not NEXT_STEP.match(ln)]
     if off:
         return "offer", " ".join(off)
     # An enumerated list is NOT a shape of its own. It was tried: over the same

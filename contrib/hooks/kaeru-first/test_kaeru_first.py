@@ -456,6 +456,17 @@ class StopShapeTests(HookCase):
         self.assertEqual((out or {}).get("decision"), "block")
         self.assertEqual(self.decisions()[-1]["shape"], "q_last")
 
+    def test_a_next_action_is_a_hand_off_not_an_ask(self):
+        """The third live false positive: an agent that closes every reply with a next action."""
+        for text in ("Session leak fixed, 68 tests green.\n\nNext: open a new session and give me the log path.",
+                     "Done.\n**Next step (1 minute):** tell me when the run is finished.",
+                     "All pushed.\n- Now: send me nothing, just open the PR page."):
+            self.assertIsNone(kf.asking_shape(text), text)
+        # A question survives the marker — that one IS an ask.
+        self.assertEqual(kf.asking_shape("Done.\nNext step: which provider do we set up?")[0], "q_last")
+        # And an imperative elsewhere in the tail still counts.
+        self.assertEqual(kf.asking_shape("I need your answer about the provider.\nNext: run the suite.")[0], "imperative")
+
     def test_a_quoted_phrase_is_mentioned_not_used(self):
         """The second live false positive: a report ABOUT the lexicon, quoting its entries."""
         for text in ("Narrowed the list. It now holds only addressed forms such as «please confirm».",
