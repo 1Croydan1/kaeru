@@ -456,6 +456,17 @@ def ends_in_question(text: str | None) -> bool:
     return bool(lines) and strip_md(lines[-1]).endswith(QMARK)
 
 
+# Text inside quotes or a code span is MENTIONED, not used. A report about this
+# very hook — "the list now holds only addressed forms such as «please
+# confirm»" — quotes an imperative without being one, and a line that ends in
+# a quoted question is not a question.
+MENTION = re.compile(r"«[^»\n]*»|“[^”\n]*”|\"[^\"\n]*\"|`[^`\n]*`")
+
+
+def used(line: str) -> str:
+    return MENTION.sub(" ", line)
+
+
 NUMBERED = re.compile(r"^\s*(?:\d+[.)]|\w[.)])\s")
 
 
@@ -488,15 +499,15 @@ def asking_shape(text: str | None) -> tuple[str, str] | None:
     if not lines:
         return None
     tail = lines[-8:]
-    if strip_md(tail[-1]).endswith(QMARK):
+    if strip_md(used(tail[-1])).endswith(QMARK):
         return "q_last", with_choice_context(tail, len(tail) - 1)
-    q_idx = [i for i, ln in enumerate(tail) if strip_md(ln).endswith(QMARK)]
+    q_idx = [i for i, ln in enumerate(tail) if strip_md(used(ln)).endswith(QMARK)]
     if q_idx:
         return "q_any", " ".join(with_choice_context(tail, i) for i in q_idx)
-    imp = [ln for ln in tail if IMPERATIVE.search(ln)]
+    imp = [ln for ln in tail if IMPERATIVE.search(used(ln))]
     if imp:
         return "imperative", " ".join(imp)
-    off = [ln for ln in tail if OFFER.search(ln)]
+    off = [ln for ln in tail if OFFER.search(used(ln))]
     if off:
         return "offer", " ".join(off)
     # An enumerated list is NOT a shape of its own. It was tried: over the same

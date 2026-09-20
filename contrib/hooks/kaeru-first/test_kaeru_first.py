@@ -456,6 +456,18 @@ class StopShapeTests(HookCase):
         self.assertEqual((out or {}).get("decision"), "block")
         self.assertEqual(self.decisions()[-1]["shape"], "q_last")
 
+    def test_a_quoted_phrase_is_mentioned_not_used(self):
+        """The second live false positive: a report ABOUT the lexicon, quoting its entries."""
+        for text in ("Narrowed the list. It now holds only addressed forms such as «please confirm».",
+                     'The bare form is gone, the addressed one stays ("waiting for your answer").',
+                     "The matcher keys on `tell me` and `let me know`, nothing looser.",
+                     "A short stem still passes untouched, for instance «Ship it?»"):
+            self.assertIsNone(kf.asking_shape(text), text)
+        # …while an imperative that merely carries a quote is still one, and still a go-word.
+        shape, asking = kf.asking_shape("Tell me when — just write «done» and the run begins.")
+        self.assertEqual(shape, "imperative")
+        self.assertEqual(kf.is_procedural(asking), "quoted_go")
+
     def test_reports_that_open_like_offers_are_not_asks(self):
         for text in ("All green. I can confirm the tests pass on both platforms.",
                      "The migration is done; you can decide later whether to keep the old table.",
