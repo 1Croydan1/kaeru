@@ -9,15 +9,17 @@ that moment on a timer — "no kaeru read in the window → deny once".
 Usage audit 5 changed two things about it.
 
 First, **the moment is wider than a question mark.** Over 2,608 turns where the
-agent stopped and waited for the human, about a thousand were an ask — and
-only 205 of those were an `AskUserQuestion` or a reply whose last line ends in
-`?`, the two shapes the first version could see. The largest class it missed,
-732, was an imperative hand-off: "say «fix it»", "I need your answer about the
-provider", "send the report over". The user's "it's in kaeru" replies landed
-on the invisible shapes far more often than on the visible ones. So `Stop` now
-looks at the whole tail of the reply, not its last character. (A fourth shape,
-the enumerated list, was counted at first and then dropped: see
-`asking_shape` — it turned out to be formatting, not asking.)
+agent stopped and waited for the human, the detector below recognises 1,164
+plain-text asks. The first version's `Stop` could see 201 of them — a reply
+whose last line ends in `?`. The largest class it missed, 856, was an
+imperative hand-off: "say «fix it»", "I need your answer about the provider",
+"send me the report". The user's "it's in kaeru" replies landed on the
+invisible shapes far more often than on the visible ones. So `Stop` now looks
+at the whole tail of the reply, not its last character. (Two shapes were
+counted at first and then dropped or narrowed — the enumerated list, and a
+bare "waiting" — see `asking_shape` and the README: both turned out to be
+reporting, not asking. Every count is an upper bound: the corpus is "turns the
+human replied to", and the human replies to every final turn eventually.)
 
 Second, **a timer is the wrong gate for a wider net, and so is a lexical one.**
 Half of those hand-offs are procedural ("write «done»") and memory cannot
@@ -299,15 +301,24 @@ EN = {
         "proceed", "continue", "hold off", r"first\b", "leave it", "don't",
     ],
     # How an ask shows up in a plain-text reply (the Stop path).
+    # Addressed forms only. A bare "confirm" also matches "I can confirm the
+    # tests pass", and a bare "decide" matches "you can decide later" — both
+    # statements, both caught by an earlier revision of this list.
     "imperative": [
-        "let me know", "tell me", "your call", "which one", "confirm", "please choose", "please pick",
-        "waiting for", "need your", "over to you", "up to you", "send me", "give me", "share the",
-        "paste the", "point me to", "decide",
+        "let me know", "tell me", "your call", "which one", "please confirm", "can you confirm",
+        "could you confirm", "confirm whether", "confirm which", "please choose", "please pick",
+        "please decide", "you decide", "waiting for your", "waiting on you", "need your", "over to you",
+        "up to you", "send me", "give me", "share the", "paste the", "point me to",
     ],
+    # "I can …", "I could …" and "Happy to …" open as many reports as offers
+    # ("I could not reproduce it", "Happy to report the build is fixed"), so an
+    # offer has to say it is one.
     "offer": [
-        "want me to", "shall i", r"i can\b", "happy to", "if you want", "if you'd like", r"i could\b",
-        "would you like", "say the word",
+        "want me to", "shall i", "if you want", "if you'd like", "would you like", "say the word",
+        "i can also", "i could also", r"happy to (?:do|take|run|write|fix|add|draft|dig|look|help)",
     ],
+    # A word that turns a confirmation into a choice.
+    "alternative": [r"or\b", "versus", r"vs\b", "either"],
     # What the human says when the agent should have looked first.
     "miss": [
         r"(?:check|look in|search|read|it'?s in|that'?s in) (?:kaeru|memory|your notes)",
@@ -337,13 +348,19 @@ def load_lexicons() -> dict[str, list[str]]:
         for f in files:
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue  # a broken lexicon is skipped, never fatal
-            if not isinstance(data, dict):
-                continue
-            for key, values in data.items():
-                if key in lex and isinstance(values, list):
-                    lex[key].extend(str(v) for v in values if str(v).strip())
+                if not isinstance(data, dict):
+                    continue
+                extra = {key: [str(v) for v in values if str(v).strip()]
+                         for key, values in data.items() if key in lex and isinstance(values, list)}
+                for key, values in extra.items():
+                    if key != "stop":
+                        for fragment in values:
+                            re.compile(fragment)      # one bad fragment disqualifies ITS file…
+            except (OSError, ValueError, re.error) as exc:
+                print(f"kaeru-first: lexicon {f.name} skipped: {exc}", file=sys.stderr)
+                continue                              # …and only its file
+            for key, values in extra.items():
+                lex[key].extend(values)
     return lex
 
 
@@ -360,6 +377,7 @@ def build(lex: dict[str, list[str]]) -> dict:
         "yesno_label": re.compile(r"^(?:\*\*)?" + _alt(lex["yesno_label"]), flags),
         "imperative": re.compile(r"\b" + _alt(lex["imperative"]) + r"\b", flags),
         "offer": re.compile(r"^(?:[-*•>]\s*)?(?:\*\*)?" + _alt(lex["offer"]), flags),
+        "alternative": re.compile(r"\b" + _alt(lex["alternative"]), flags),
         "miss": re.compile(_alt(lex["miss"]), flags),
         "complaint": re.compile(_alt(lex["complaint"]), flags),
         "capture": re.compile(_alt(lex["capture"]), flags),
@@ -369,12 +387,12 @@ def build(lex: dict[str, list[str]]) -> dict:
 try:
     LEX = build(load_lexicons())
 except re.error:
-    # A lexicon file with a bad fragment must not take the hook down with it.
+    # Files are validated one by one above; this is the belt to those braces.
     LEX = build({key: list(values) for key, values in EN.items()})
 
 STOP = LEX["stop"]
 QUOTED_GO, CONFIRM_STEM, YESNO_LABEL = LEX["quoted_go"], LEX["confirm_stem"], LEX["yesno_label"]
-IMPERATIVE, OFFER = LEX["imperative"], LEX["offer"]
+IMPERATIVE, OFFER, ALTERNATIVE = LEX["imperative"], LEX["offer"], LEX["alternative"]
 MISS_MARKERS, COMPLAINT_MARKERS, CAPTURE_MARKERS = LEX["miss"], LEX["complaint"], LEX["capture"]
 QMARK = ("?", "？")
 
@@ -386,15 +404,12 @@ def strip_md(line: str) -> str:
 TOKEN = re.compile(r"[^\W_][\w-]*|[.!?:;\n]")
 
 
-def terms_of(text: str, cap: int = 8) -> list[str]:
-    """The terms worth searching for — entities first, then by length.
+def scan_terms(text: str) -> dict[str, bool]:
+    """Every searchable term in `text`, flagged by whether it looks like an entity.
 
-    Length is a poor proxy for what matters: in "once you tell me about the
-    key, I'll run generation and bring the second column" the word the human's
-    answer turned on is the shortest one. So what looks like an entity goes
-    first — a token with a digit in it (`k8s`), a hyphenated name, a Latin
-    token inside prose written in another script, a word capitalised anywhere
-    but the start of a sentence — and only then length.
+    An entity is a token with a digit in it (`k8s`), a hyphenated name, a Latin
+    token inside prose written in another script, or a word capitalised
+    anywhere but the start of a sentence.
     """
     mixed = any(ord(c) > 127 and c.isalpha() for c in text)
     entity: dict[str, bool] = {}
@@ -415,6 +430,22 @@ def terms_of(text: str, cap: int = 8) -> list[str]:
             )
             entity[w] = entity.get(w, False) or looks_like_one
         sentence_start = False
+    return entity
+
+
+def has_entity(text: str) -> bool:
+    return any(scan_terms(text).values())
+
+
+def terms_of(text: str, cap: int = 8) -> list[str]:
+    """The terms worth searching for — entities first, then by length.
+
+    Length is a poor proxy for what matters: in "once you tell me about the
+    key, I'll run generation and bring the second column" the word the human's
+    answer turned on is the shortest one. So what looks like an entity goes
+    first, and only then length.
+    """
+    entity = scan_terms(text)
     return sorted(entity, key=lambda w: (not entity[w], -len(w), w))[:cap]
 
 
@@ -486,7 +517,11 @@ def is_procedural(question: str, options: list[str] | None = None) -> str | None
         if any(YESNO_LABEL.match(o.strip()) for o in options):
             return "yesno_options"
     first = strip_md(q.splitlines()[0]) if q else ""
-    if len(first) <= 90 and CONFIRM_STEM.match(first):
+    # "Ship it?" is a confirmation. "Should I use the staging token or the prod
+    # one for the Acme deploy?" starts the same way and is exactly the question
+    # memory tends to answer — so the stem exempts only a short line that
+    # offers no alternative and names no entity.
+    if len(first) <= 90 and CONFIRM_STEM.match(first) and not ALTERNATIVE.search(first) and not has_entity(q):
         return "confirm_stem"
     return None
 
@@ -495,14 +530,26 @@ def is_procedural(question: str, options: list[str] | None = None) -> str | None
 
 
 class Kaeru:
-    """A minimal MCP client over urllib. Three requests, one search."""
+    """A minimal MCP client over urllib: open a session, search once, CLOSE it.
+
+    Closing is not optional. The daemon runs with idle reaping off on purpose —
+    a five-minute reaper used to kill editor sessions during ordinary pauses —
+    so a session nobody closes lives until the daemon restarts. A hook that
+    opens one per gated ask and walks away leaks thousands of them.
+    """
+
+    # The harness gives the hook ten seconds. The whole exchange — open,
+    # search, close — has to fit inside that with room to spare, or the hook
+    # is killed mid-flight and the session it opened is never closed.
+    BUDGET = 6.0
 
     def __init__(self) -> None:
         self.url = os.environ.get("KAERU_FIRST_URL", "http://127.0.0.1:9876/mcp")
         self.token = os.environ.get("KAERU_FIRST_TOKEN")
-        self.timeout = 3.0
+        self.deadline = time.monotonic() + self.BUDGET
 
-    def _post(self, body: dict, sid: str | None = None) -> tuple[str | None, str]:
+    def _request(self, method: str, body: dict | None = None, sid: str | None = None,
+                 timeout: float | None = None) -> tuple[str | None, str]:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
@@ -511,10 +558,22 @@ class Kaeru:
             headers["Mcp-Session-Id"] = sid
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        req = urllib.request.Request(self.url, data=json.dumps(body).encode(), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+        if timeout is None:
+            timeout = max(0.2, min(3.0, self.deadline - time.monotonic()))
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             new_sid = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
             return new_sid, resp.read().decode("utf-8", "replace")
+
+    def _close(self, sid: str | None) -> None:
+        """End the session. Best-effort, own short timeout, never raises."""
+        if not sid:
+            return
+        try:
+            self._request("DELETE", sid=sid, timeout=1.5)
+        except Exception:  # noqa: BLE001 — closing must not fail the hook
+            pass
 
     @staticmethod
     def _result_text(raw: str) -> str:
@@ -540,20 +599,25 @@ class Kaeru:
         """Unscoped prefix search. None means the daemon could not be asked."""
         if not terms:
             return []
-        query = " OR ".join(f"{t}*" for t in terms)
+        return self.query(" OR ".join(f"{t}*" for t in terms), limit)
+
+    def query(self, query: str, limit: int) -> list[tuple[str, str]] | None:
+        sid = None
         try:
-            sid, _ = self._post({
+            sid, _ = self._request("POST", {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                            "clientInfo": {"name": "kaeru-first", "version": "2"}},
             })
-            self._post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
-            _, raw = self._post({
+            self._request("POST", {"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
+            _, raw = self._request("POST", {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": {"name": "search", "arguments": {"query": query, "limit": limit}},
             }, sid)
         except (urllib.error.URLError, OSError, ValueError):
             return None
+        finally:
+            self._close(sid)   # whatever happened above — success, error, timeout
         return parse_hits(self._result_text(raw))
 
 
@@ -632,20 +696,18 @@ def relevant_read(state: dict, terms: list[str]) -> dict | None:
 
 
 def unread_hits(state: dict) -> list[str]:
-    """Names the last recent search returned that no node-read touched since."""
+    """Names the last recent search returned, none of which this SESSION has read.
+
+    The search has to be recent — that is what makes it "the search you just
+    ran". The reading does not: a node read two hours ago is still in the
+    agent's context, and asking for it to be read again is nagging.
+    """
     reads = recent_reads(state)
-    last_search = None
-    for i in range(len(reads) - 1, -1, -1):
-        if reads[i].get("verb") == "search":
-            last_search = i
-            break
-    if last_search is None:
-        return []
-    names = list(reads[last_search].get("hits", []))
+    last = next((r for r in reversed(reads) if r.get("verb") == "search"), None)
+    names = list((last or {}).get("hits", []))
     if not names:
         return []
-    read_after = {r.get("name") for r in reads[last_search + 1:] if r.get("verb") in NODE_READ_VERBS}
-    if read_after & set(names):
+    if set(names) & set(state.get("read_names", [])):
         return []
     return names
 
@@ -750,6 +812,11 @@ def on_post_tool_use(event: dict, state: dict, session: str) -> dict | None:
         record["hits"] = [h[0] for h in parse_hits(text)][:10]
     state.setdefault("reads", []).append(record)
     state["last_read"] = record["t"]
+    if verb in NODE_READ_VERBS and record["name"]:
+        seen = state.setdefault("read_names", [])
+        if record["name"] not in seen:
+            seen.append(record["name"])
+            del seen[:-500]
     return None
 
 
@@ -793,29 +860,36 @@ def on_stop(event: dict, state: dict, session: str) -> dict | None:
 
 
 def on_user_prompt_submit(event: dict, state: dict, session: str) -> dict | None:
-    was_question = bool(state.get("last_reply_question"))
     last_ask = state.pop("last_ask", None)
     state["last_reply_question"] = False
     prompt = (event.get("prompt") or "").strip()
-    if not prompt:
+    # A reply is only a reply if something was asked. Without that, "we decided
+    # on postgres last week, now write the migration" reads as "it was in
+    # memory" — the markers are loose on purpose, and only an ask gives them
+    # something to be about.
+    if not prompt or not last_ask:
         return None
-    outcome = None
     if MISS_MARKERS.search(prompt):
         outcome = "miss"
     elif COMPLAINT_MARKERS.search(prompt):
         outcome = "complaint"
     elif CAPTURE_MARKERS.search(prompt):
         outcome = "capture_nudge"
-    if last_ask or outcome:
-        log_decision({
-            "session": session, "event": "UserPromptSubmit",
-            "after_shape": (last_ask or {}).get("shape"), "after_decision": (last_ask or {}).get("decision"),
-            "after_reason": (last_ask or {}).get("reason"), "outcome": outcome or ("answered" if last_ask else None),
-            "reply": prompt[:160],
-        })
+    else:
+        outcome = "answered"
+    # The reply's text is NOT logged: a human answering a question sometimes
+    # pastes the key the agent asked for. Its length is enough to measure with.
+    log_decision({
+        "session": session, "event": "UserPromptSubmit",
+        "after_shape": last_ask.get("shape"), "after_decision": last_ask.get("decision"),
+        "after_reason": last_ask.get("reason"), "outcome": outcome, "reply_len": len(prompt),
+    })
     if outcome in ("miss", "complaint"):
         return add_context(CAPTURE_MISS)
-    if not was_question or len(prompt) < SUBSTANTIAL_ANSWER:
+    # A go-word after "say «ship it»" is not knowledge, and neither is whatever
+    # the human says next after a hand-off the gate itself called procedural.
+    procedural = str(last_ask.get("reason") or "").startswith("exempt:")
+    if outcome != "answered" or procedural or len(prompt) < SUBSTANTIAL_ANSWER:
         return None
     return add_context(CAPTURE)
 

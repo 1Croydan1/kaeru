@@ -17,24 +17,28 @@ with a search recipe.
 Usage audit 5 replayed it over every turn where the agent stopped and waited
 for the human — 2,608 of them in one user's logs — and changed two things.
 
-**The moment is wider than a question mark.** About a thousand of those turns
-were an ask in some form. Only 205 were an `AskUserQuestion` or a reply whose
-last line ends in `?` — the two shapes the first version could see. The
-largest class it missed, 732, was an imperative hand-off: *"say «fix it»"*,
-*"I need your answer about the provider"*, *"send the report over"*. Then a
-question above the last line (72) and an offer without a question mark (32).
-The human's *"it's in kaeru"* replies landed on the invisible shapes far more
-often than on the visible ones.
+**The moment is wider than a question mark.** In plain text, the hook's
+detector now recognises 1,164 of those turns as an ask. The first version's
+`Stop` could see 201 of them (17%) — a reply whose last line ends in `?`. The
+largest class it missed, 856, was an imperative hand-off: *"say «fix it»"*,
+*"I need your answer about the provider"*, *"send me the report"*. Then a
+question above the last line (72) and an offer that says it is one (35).
+(`AskUserQuestion` is a separate path; both versions see it.) The human's
+*"it's in kaeru"* replies landed on the invisible shapes far more often than
+on the visible ones.
 
-A fourth shape was counted at first and then dropped, and the correction is
-worth keeping: an **enumerated list** with a "choice cue" matched 133 replies,
-and on inspection none of a sample of twenty was a question memory could
-answer — they were status reports with bold bullets and *"next: do X"*
-hand-offs. The hook's first live firing was a false positive on exactly that.
-A real choice comes with a question mark or an imperative and is caught by
-those; what is left over is formatting. The same caution applies to every
-count above: the corpus is "turns the human replied to", and the human
-eventually replies to every final turn, so these are upper bounds on asking.
+Two corrections are worth keeping, because both came from the hook's own first
+days rather than from the design. An **enumerated list** with a "choice cue"
+was a fourth shape: it matched 133 replies, and of a sample of twenty none was
+a question memory could answer — status reports with bold bullets and *"next:
+do X"* hand-offs. The hook's first live firing was a false positive on exactly
+that, and the shape is gone. And a bare *"waiting"* was an imperative: 143
+replies hung on it alone, nearly all of them the agent waiting for an artefact
+or an event — *"waiting for the run to finish"*, *"waiting for the photo"* —
+not for knowledge; only the addressed form (*"waiting for your answer"*)
+counts now. The general caution: the corpus is "turns the human replied to",
+and the human eventually replies to every final turn, so every count here is
+an upper bound on asking.
 
 **A timer is the wrong gate for a wider net — and so is a lexical one.** Half
 of those hand-offs are procedural — *"write «done»"* — and memory cannot
@@ -78,23 +82,26 @@ same terms never sees the hook at all.
 
 **Shapes `Stop` recognises**, looking at the last eight lines: a line ending
 in `?` (last or not), an imperative addressed to the human (*tell me, let me
-know, confirm, send me, I need your …, your call*), an offer waiting for a
-yes (*Want me to …, I can …, Happy to …*), an enumerated
-choice with a choice cue. Codex has no `AskUserQuestion` — it asks in plain
+know, please confirm, send me, I need your …, your call*), an offer waiting for a
+yes (*Want me to …, If you want …, Would you like …*). Codex has no `AskUserQuestion` — it asks in plain
 text — so there this is the whole mechanism.
 
 **The gate**, in order:
 
 1. **Procedural → pass, no search.** A quoted go-word (*say «fix it»*),
    yes/no-shaped options (*Yes, go / No, later*), a bare confirmation stem
-   (*Ship it?*), or nothing left after the stopwords. Memory has no
+   (*Ship it?* — but only a short line that offers no alternative and names no
+   entity: *"Should I use the staging token or the prod one for the Acme
+   deploy?"* starts the same way and is searched), or nothing left after the
+   stopwords. Memory has no
    answer to these, and blocking a *"push?"* to force a search is worse than
    not asking. 14% of real asks.
 2. **A relevant read → pass.** A recent read (`search`, `at`, `neighbours`,
    `awake`, …) whose terms overlap the question's. The agent already looked.
    A read about something else does not count — recency is not relevance.
 3. **Hits the agent never read → deny.** The last `search` returned names and
-   no `at` / `drill` / `neighbours` followed. A search you do not read is not
+   this session has read none of them — at any point: a node read two hours
+   ago is still in context, and asking for it again would be nagging. A search you do not read is not
    a search; the message names what was skipped.
 4. **Show the hits → deny once.** One unscoped `search` of the question's
    terms as `OR`-ed prefixes — entities first (a Latin or digit-bearing token,
@@ -132,27 +139,33 @@ the verbs that make a hand-off, the shape of a yes/no label, what *"it was in
 memory"* sounds like. The script carries an English lexicon so it works as a
 single file. Any `lexicon/*.json` beside it — and any in
 `$KAERU_FIRST_LEXICON_DIR` — is merged in, so a vault written in another
-language needs a file, not a fork:
+language needs a file, not a fork. A Russian one ships in `lexicon/ru.json`;
+copy the directory along with the script.
 
 ```json
 {
   "stop":        ["…function words and procedural vocabulary…"],
   "quoted_go":   ["…verbs that precede a quoted go-word…"],
-  "confirm_stem":["…"], "yesno_label": ["…"],
+  "confirm_stem":["…"], "yesno_label": ["…"], "alternative": ["…"],
   "imperative":  ["…"], "offer": ["…"],
   "miss":        ["…regex fragments…"], "complaint": ["…"], "capture": ["…"]
 }
 ```
 
 `stop` is a list of words; every other key is a list of regex fragments,
-alternated with the English ones. A file that does not parse is skipped, and a
-fragment that does not compile drops the hook back to English rather than
-taking it down. kaeru's own rule applies here too: store and search in the
-user's language — so the net that catches an ask has to speak it as well.
+alternated with the English ones. Each file is validated on its own: one that
+does not parse, or carries a fragment that does not compile, is skipped with a
+line on stderr, and the others still apply. kaeru's own rule holds here too:
+store and search in the user's language — so the net that catches an ask has
+to speak it as well. A personal lexicon — the phrases *you* use when the agent
+should have looked first — belongs in your own directory, not in the repo.
 
-The numbers in this README were measured with such a lexicon, on a vault that
-is not in English; the tokenizer is script-agnostic, and treats a Latin token
-inside prose in another script as an entity.
+Precision matters more than recall in these lists. A bare *"confirm"* also
+matches *"I can confirm the tests pass"*; *"I could …"* and *"Happy to …"* open
+as many reports as offers. An entry should be the addressed form.
+
+The tokenizer is script-agnostic, and treats a Latin token inside prose in
+another script as an entity.
 
 ## Design notes
 
@@ -162,7 +175,19 @@ inside prose in another script as an entity.
   are internal and differ between the two.
 - **The hook's own search is not a read.** It goes to the daemon over HTTP,
   not through the harness, so it never fires `PostToolUse` and never opens
-  its own gate. Only the agent's reads count.
+  its own gate. Only the agent's reads count. It does reach the daemon like
+  any other call, though, so a usage audit built from daemon logs will see
+  it: it identifies itself as `clientInfo: kaeru-first` — filter on that.
+- **It closes every session it opens.** The daemon runs with idle reaping off
+  on purpose (a five-minute reaper used to kill editor sessions during
+  ordinary pauses), so a session nobody closes lives until the daemon
+  restarts. Open, search and close share one six-second budget, inside the
+  harness's ten, and the close runs in a `finally`.
+- **The human's reply is classified, never stored.** Only its outcome and its
+  length reach the log — someone answering a question sometimes pastes the
+  key the agent asked for. And a reply is only classified when it follows an
+  ask: the markers are loose on purpose, and *"we decided on postgres last
+  week, now write the migration"* is a task, not a complaint.
 - **Blocks once per turn per reason, never loops.** `Stop` honours
   `stop_hook_active`. An agent that searched, read, and still needs to ask,
   asks.
@@ -179,7 +204,7 @@ Needs `python3` (stdlib only). Copy the scripts somewhere stable:
 
 ```sh
 mkdir -p ~/.local/share/kaeru-first
-cp kaeru_first.py kaeru_first_report.py ~/.local/share/kaeru-first/
+cp -R kaeru_first.py kaeru_first_report.py lexicon ~/.local/share/kaeru-first/
 chmod +x ~/.local/share/kaeru-first/*.py
 ```
 

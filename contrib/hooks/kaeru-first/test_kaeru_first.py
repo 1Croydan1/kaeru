@@ -31,10 +31,19 @@ class FakeKaeru(BaseHTTPRequestHandler):
 
     known: set[str] = set()
     calls: list[str] = []
+    opened: list[str] = []     # session ids handed out by `initialize`
+    closed: list[str] = []     # session ids the client ended with DELETE
+    fail_call: bool = False    # answer the search itself with a 500
     echo_terms: bool = True   # excerpt repeats the query terms, so a known-term question scores
 
     def log_message(self, *_):  # silence
         pass
+
+    def do_DELETE(self):
+        FakeKaeru.closed.append(self.headers.get("Mcp-Session-Id") or "")
+        self.send_response(202)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -43,8 +52,10 @@ class FakeKaeru(BaseHTTPRequestHandler):
         if method == "initialize":
             out = {"jsonrpc": "2.0", "id": body.get("id"), "result": {"protocolVersion": "2025-06-18", "capabilities": {}}}
             data = json.dumps(out).encode()
+            sid = f"fake-session-{len(FakeKaeru.opened) + 1}"
+            FakeKaeru.opened.append(sid)
             self.send_response(200)
-            self.send_header("Mcp-Session-Id", "fake-session")
+            self.send_header("Mcp-Session-Id", sid)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -57,6 +68,11 @@ class FakeKaeru(BaseHTTPRequestHandler):
             return
         query = (body.get("params") or {}).get("arguments", {}).get("query", "")
         FakeKaeru.calls.append(query)
+        if FakeKaeru.fail_call:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         terms = [t.rstrip("*") for t in query.split(" OR ")]
         if any(t.startswith(k) or k.startswith(t) for t in terms for k in FakeKaeru.known):
             echo = (" · " + " ".join(terms)) if FakeKaeru.echo_terms else ""
@@ -98,6 +114,7 @@ class HookCase(unittest.TestCase):
         FakeKaeru.known = set()
         FakeKaeru.calls = []
         FakeKaeru.echo_terms = True
+        FakeKaeru.opened, FakeKaeru.closed, FakeKaeru.fail_call = [], [], False
         self.env_extra: dict[str, str] = {}
 
     def run_hook(self, event: dict, url: str | None = None, **env_over) -> dict | None:
@@ -229,6 +246,21 @@ class ProceduralTests(HookCase):
         self.assertIsNone(out)
         self.assertEqual(self.decisions()[-1]["reason"], "exempt:confirm_stem")
 
+    def test_a_stem_does_not_exempt_a_question_with_an_alternative_or_an_entity(self):
+        FakeKaeru.known = {"token", "migration"}
+        for q in ("Should I use the staging token or the prod one for the Acme deploy?",
+                  "Start with the ledger migration or with the cloud auth first?",
+                  "Should I rotate the token for Acme?"):
+            FakeKaeru.calls.clear()
+            self.run_hook(self.ask(q, prompt_id=q))
+            self.assertEqual(self.decisions()[-1]["reason"], "hits_shown", q)
+            self.assertTrue(FakeKaeru.calls, q)
+
+    def test_a_plain_confirmation_is_still_exempt(self):
+        for q in ("Should I push to staging?", "Ship it?", "Go ahead with the merge?"):
+            self.assertIsNone(self.run_hook(self.ask(q, prompt_id=q)))
+            self.assertEqual(self.decisions()[-1]["reason"], "exempt:confirm_stem", q)
+
     def test_a_question_with_no_entities_passes(self):
         out = self.run_hook(self.ask("What next?"))
         self.assertIsNone(out)
@@ -304,6 +336,20 @@ class ShowHitsTests(HookCase):
         self.assertIsNone(out)
         self.assertEqual(self.decisions()[-1]["reason"], "no_hits")
 
+    def test_a_node_read_hours_ago_is_still_read(self):
+        """The search must be recent; the reading need not be — it is still in context."""
+        self.run_hook(self.read("at", name="provider-switch-note"))
+        state_file = Path(self.state) / "s1.json"
+        state = json.loads(state_file.read_text())
+        for r in state["reads"]:
+            r["t"] -= 7200                       # two hours ago: outside the window
+        state_file.write_text(json.dumps(state))
+        self.run_hook(self.read("search", query="provider*", _response=
+            "matches (1):\n  - provider-switch-note (episode) — 01a0\n    excerpt\n"))
+        out = self.run_hook(self.ask("Which certificate belongs on the server?"))
+        self.assertIsNone(out)
+        self.assertEqual(self.decisions()[-1]["reason"], "no_hits")
+
     def test_the_hook_shows_hits_it_cannot_vouch_for(self):
         """It ranks, it does not judge: a loose hit is still shown, and logged as loose."""
         FakeKaeru.known = {"screen"}
@@ -327,6 +373,38 @@ class ShowHitsTests(HookCase):
         self.assertIn("Before you ask the user", denied_reason(out))
         self.run_hook(self.read("overview"), url=DEAD_URL, KAERU_FIRST_SEARCH="0")
         self.assertIsNone(self.run_hook(self.ask("Which provider are we on?", prompt_id="t2"), url=DEAD_URL, KAERU_FIRST_SEARCH="0"))
+
+
+# ------------------------------------------------------- it cleans up after itself
+
+
+class SessionHygieneTests(HookCase):
+    """The daemon never reaps an idle session, so every one the hook opens it must close."""
+
+    def test_every_search_closes_the_session_it_opened(self):
+        FakeKaeru.known = {"provider"}
+        for turn in range(5):
+            self.run_hook(self.ask("Which provider are we on?", prompt_id=f"t{turn}"))
+        self.assertEqual(len(FakeKaeru.opened), 5)
+        self.assertEqual(FakeKaeru.closed, FakeKaeru.opened)
+
+    def test_a_search_with_no_hits_closes_it_too(self):
+        self.run_hook(self.ask("Which provider are we on?"))
+        self.assertEqual(FakeKaeru.closed, FakeKaeru.opened)
+        self.assertEqual(len(FakeKaeru.opened), 1)
+
+    def test_a_failed_search_still_closes_the_session(self):
+        FakeKaeru.known = {"provider"}
+        FakeKaeru.fail_call = True
+        out = self.run_hook(self.ask("Which provider are we on?"))
+        self.assertIsNone(out)                                   # fails open…
+        self.assertEqual(self.decisions()[-1]["reason"], "daemon_unreachable")
+        self.assertEqual(FakeKaeru.closed, FakeKaeru.opened)     # …and still cleans up
+        self.assertEqual(len(FakeKaeru.opened), 1)
+
+    def test_an_exempt_ask_opens_nothing(self):
+        self.run_hook(self.ask("Say «fix it» and I will go."))
+        self.assertEqual(FakeKaeru.opened, [])
 
 
 # ------------------------------------------------------------- the Stop path
@@ -378,6 +456,15 @@ class StopShapeTests(HookCase):
         self.assertEqual((out or {}).get("decision"), "block")
         self.assertEqual(self.decisions()[-1]["shape"], "q_last")
 
+    def test_reports_that_open_like_offers_are_not_asks(self):
+        for text in ("All green. I can confirm the tests pass on both platforms.",
+                     "The migration is done; you can decide later whether to keep the old table.",
+                     "I could not reproduce it locally.",
+                     "Happy to report the build is fixed."):
+            self.assertIsNone(kf.asking_shape(text), text)
+        self.assertEqual(kf.asking_shape("Please confirm which provider we use.")[0], "imperative")
+        self.assertEqual(kf.asking_shape("Done.\nIf you want, the provider can move to the backup one.")[0], "offer")
+
     def test_a_statement_passes(self):
         self.assertIsNone(self.run_hook(self.stop("The provider is configured and the suite is green.")))
         self.assertEqual(self.decisions(), [])
@@ -421,14 +508,41 @@ class ReplyTests(HookCase):
         self.assertEqual(d["after_shape"], "q_last")
 
     def test_a_use_memory_complaint_is_logged(self):
-        self.run_hook(self.stop("The provider is configured."))
+        self.run_hook(self.stop("Which certificate belongs on the server?"))
         self.run_hook(self.prompt("come on, use memory for once"))
         self.assertEqual(self.decisions()[-1]["outcome"], "complaint")
 
     def test_a_capture_nudge_is_logged(self):
-        self.run_hook(self.stop("The provider is configured."))
+        self.run_hook(self.stop("Which certificate belongs on the server?"))
         self.assertIsNone(self.run_hook(self.prompt("put that into kaeru")))
         self.assertEqual(self.decisions()[-1]["outcome"], "capture_nudge")
+
+    def test_a_prompt_that_answers_nothing_is_not_classified(self):
+        """The markers are loose; only an ask gives them something to be about."""
+        for text in ("we decided on postgres last week, now implement the migration",
+                     "as I said, keep it simple — write the parser",
+                     "we did it! now let's go to the next issue"):
+            self.assertIsNone(self.run_hook(self.prompt(text)), text)
+        self.assertEqual(self.decisions(), [])
+
+    def test_a_statement_in_between_clears_the_ask(self):
+        self.run_hook(self.stop("Which certificate belongs on the server?"))
+        self.run_hook(self.stop("Never mind, found it: the wildcard one.", prompt_id="t2"))
+        self.assertIsNone(self.run_hook(self.prompt("we decided on postgres last week, now implement the migration")))
+
+    def test_a_go_word_is_not_knowledge_to_capture(self):
+        """After «say "ship it"» whatever comes next is a go-word or a new task, not an answer."""
+        self.run_hook(self.stop("The provider is set. Tell me when — just write «done» and the run begins."))
+        self.assertIsNone(self.run_hook(self.prompt("the review came back, have a look at what they are asking for")))
+        self.assertEqual(self.decisions()[-1]["outcome"], "answered")
+
+    def test_the_reply_text_never_reaches_the_log(self):
+        self.run_hook(self.stop("Which certificate belongs on the server?"))
+        reply = "use this one: sk-live-0123456789abcdef0123456789abcdef, it sits under /etc/ssl"
+        self.run_hook(self.prompt(reply))
+        raw = (Path(self.state) / "decisions.jsonl").read_text()
+        self.assertNotIn("sk-live", raw)
+        self.assertEqual(self.decisions()[-1]["reply_len"], len(reply))
 
 
 # ------------------------------------------------------------------ lexicons
@@ -459,11 +573,28 @@ class LexiconTests(HookCase):
         out = self.run_hook(self.ask("Which provider are we on?"), KAERU_FIRST_LEXICON_DIR=d)
         self.assertIsNotNone(out)
 
-    def test_a_bad_regex_fragment_falls_back_to_english(self):
+    def test_a_bad_fragment_skips_its_file_and_only_its_file(self):
         FakeKaeru.known = {"provider"}
-        d = self.lexicon({"bad.json": json.dumps({"imperative": ["(unclosed"]})})
-        out = self.run_hook(self.stop("Gates are green.\n**I need your answer about the provider.**"), KAERU_FIRST_LEXICON_DIR=d)
-        self.assertEqual((out or {}).get("decision"), "block")
+        d = self.lexicon({"bad.json": json.dumps({"imperative": ["(unclosed"]}),
+                          "good.json": json.dumps({"imperative": ["zzask"]})})
+        out = self.run_hook(self.stop("The provider is configured. Zzask the plan of the provider"), KAERU_FIRST_LEXICON_DIR=d)
+        self.assertEqual((out or {}).get("decision"), "block")          # good.json still applied
+        out = self.run_hook(self.stop("Gates are green.\n**I need your answer about the provider.**", prompt_id="t2"),
+                            KAERU_FIRST_LEXICON_DIR=d)
+        self.assertEqual((out or {}).get("decision"), "block")          # and English is intact
+
+    def test_every_shipped_lexicon_is_well_formed(self):
+        import re as _re
+        shipped = sorted((SCRIPT.parent / "lexicon").glob("*.json"))
+        self.assertTrue(shipped, "a lexicon directory ships with the hook")
+        for f in shipped:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            self.assertLessEqual(set(data), set(kf.EN), f"{f.name}: unknown key")
+            for key, values in data.items():
+                self.assertIsInstance(values, list, f"{f.name}:{key}")
+                if key != "stop":
+                    for fragment in values:
+                        _re.compile(fragment)
 
 
 # -------------------------------------------------------------- pure helpers
