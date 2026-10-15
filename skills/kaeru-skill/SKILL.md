@@ -243,9 +243,11 @@ something once" and "next session can find it via three different paths".
   it. Costs one call per edge. Pays off every time someone
   navigates in.
 
-- **Know the three read depths.** `recall <name>` returns just the id;
-  `drill <name>` gives a short body **excerpt** plus 1-hop neighbors; and
-  `at <name>` reads the node **in full** — the whole untruncated body and
+- **Know the read depths.** `recall <name>` returns just the id;
+  `drill <name>` gives a short body **excerpt** plus its `derived_from` /
+  `part_of` children — two edge types of twelve; `neighbours <name>` lists
+  **every** link, both directions, including what superseded or disputes
+  it; and `at <name>` reads the node **in full** — the whole untruncated body and
   every field (type, tier, layer, visibility, tags). `drill` / `search` /
   `recall` all truncate the body, so when you actually need a node's
   complete content, reach for `at`. (Add `when="5m"` / `"2h"` / a date to
@@ -255,7 +257,7 @@ something once" and "next session can find it via three different paths".
 - **Refine, don't stampede.** If `search "X"` doesn't surface what you
   want in the top 3 hits, the next call should be a *different shape* —
   `search "X*"` for inflection, `tagged "topic:X"` for exact-token
-  slice, or `drill <related-name>` to walk in. Five variant phrasings
+  slice, or `neighbours <related-name>` to walk in from the closest hit. Five variant phrasings
   in 20 seconds is almost always slower than reading the first three
   results carefully and then making one targeted call.
 
@@ -328,7 +330,8 @@ has been replaced".
 
 ```
 recall(name="<name>", initiative="X")          # exact name → id, nothing else
-drill(name="<name>", initiative="X")           # the node + one hop of neighbours
+drill(name="<name>", initiative="X")           # the node + its derived_from / part_of children
+neighbours(name="<name>", initiative="X")      # every link, both directions, typed
 at(name="<name>", initiative="X")              # the node IN FULL — whole body, all fields
 at(name="<name>", when="2h", initiative="X")   # …as it stood two hours ago
 search(query="<query>", initiative="X")        # full-text over name + body
@@ -345,6 +348,12 @@ board(initiative="X")                          # tasks by column
 
 **`drill` and `search` return excerpts; `at` returns the text.** If a
 body matters, `at` it — the excerpt is for deciding whether to.
+
+**A `⚠` on a hit is the graph talking.** `⚠ superseded by` / `refuted by`
+/ `disputed by <node>` means another node replaced or challenges this one
+— read that node before relying on the hit. Before trusting an unmarked
+hit that matters, `neighbours <name>` shows the rest of what it is
+linked to; the search footer names it for the best hit that has links.
 
 `drill` is the most-used: replaces `recall <name>` + `summary <id>`
 with one round-trip.

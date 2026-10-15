@@ -634,7 +634,7 @@ impl KaeruServer {
 
     // ----- Lookup --------------------------------------------------------
     #[tool(
-        description = "Look up a node id by EXACT name — no fuzziness, no stemming. Returns the id alone, so follow it with `at <name>` for the full text or `drill <name>` for its neighbours. When you don't know the exact name, `search` is the verb; a miss here tells you whether the name lives in another initiative, is spelled differently, or is absent."
+        description = "Look up a node id by EXACT name — no fuzziness, no stemming. Returns the id alone, so follow it with `at <name>` for the full text or `neighbours <name>` for everything linked to it. When you don't know the exact name, `search` is the verb; a miss here tells you whether the name lives in another initiative, is spelled differently, or is absent."
     )]
     fn recall(&self, Parameters(p): Parameters<NameScope>) -> Result<CallToolResult, McpError> {
         tools::lookup::recall(&self.store, &p.name, p.initiative.as_deref())
@@ -655,7 +655,7 @@ impl KaeruServer {
     }
 
     #[tool(
-        description = "Full-text search across name and body via Cozo FTS. No stemming — search the form you wrote. For inflection-tolerant matching across any language append `*`: `утечк*` finds `утечку`/`утечке`, `token*` finds `tokens`/`tokenize`. Search in the SAME language as the original capture, not in English. Results are ordered by score, then newest-first within equal scores."
+        description = "Full-text search across name and body via Cozo FTS. No stemming — search the form you wrote. For inflection-tolerant matching across any language append `*`: `утечк*` finds `утечку`/`утечке`, `token*` finds `tokens`/`tokenize`. Search in the SAME language as the original capture, not in English. Results are ordered by score, then newest-first within equal scores. A hit the graph has ruled on carries `⚠ superseded by` / `refuted by` / `disputed by <node>` — read that node before relying on the hit. Excerpts only: `at <name>` reads a hit in full, `neighbours <name>` shows everything linked to it (`drill` follows only derived_from / part_of). A miss is not proof of absence: try fewer words, `OR`, the other script (Latin / Cyrillic), or no `initiative`."
     )]
     fn search(&self, Parameters(p): Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
         tools::lookup::search(&self.store, &p.query, p.limit, p.initiative.as_deref())
@@ -1043,9 +1043,9 @@ impl ServerHandler for KaeruServer {
              targets, supersedes, verifies, falsifies, temporal. weight 0..1 required, load-bearing. An \
              island is found only by exact name.\n\nTHEN CHAIN: once work runs observation→decision, `chain \
              from to --summary` saves that trail; `why <node>` reads the reasoning that leads there. A \
-             chain is the WHY a fresh agent reads.\n\nREAD: `recall` exact name · `search q*` fuzzy · `drill` node+children · `at <name>` FULL text — drill/search show \
-             excerpts only · `at <name> when=2h` past state · `history` versions · `trace` provenance · \
-             `between` how two nodes connect · `tagged \"topic:x\"` · `surface layers=cold` archived · \
+             chain is the WHY a fresh agent reads.\n\nREAD: `recall` exact name · `search q*` fuzzy, ⚠ = replaced/disputed · `neighbours` every link · \
+             `at <name>` FULL text, the rest excerpts · `at <name> when=2h` past state · `history` versions · \
+             `trace` provenance · `between` A↔B edges · `tagged \"topic:x\"` · `surface layers=cold` archived · \
              `board` open tasks.\n\nCLOUD: a shared initiative has a team tier: `cloud_recall`.\n\nLANGUAGE: store and search in \
              the user's language; never translate.",
         )
@@ -1148,8 +1148,19 @@ mod tests {
         );
         let text = server.get_info().instructions.unwrap_or_default();
         for verb in [
-            "chain", "why", "tagged", "trace", "surface", "between", "at", "history", "cite",
+            "chain",
+            "why",
+            "tagged",
+            "trace",
+            "surface",
+            "between",
+            "at",
+            "history",
+            "cite",
             "task",
+            // The one read verb that sees every edge type — the only path from
+            // a hit to what replaced or disputes it (#114).
+            "neighbours",
         ] {
             assert!(
                 text.contains(verb),

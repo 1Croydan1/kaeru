@@ -8,14 +8,36 @@
 //! memory handle.
 
 use kaeru_core::{
-    Layer, at, between, fuzzy_recall, history, neighbours, parse_when, read_node_full,
-    recall_by_layer, recall_id_by_name, recollect_idea, recollect_outcome, recollect_provenance,
-    summary_view, tagged, tags_like, unversioned_changes,
+    Layer, NodeBrief, Store, at, between, fuzzy_recall, history, neighbours, parse_when,
+    read_node_full, recall_by_layer, recall_id_by_name, recollect_idea, recollect_outcome,
+    recollect_provenance, standing, summary_view, tagged, tags_like, unversioned_changes,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{brief, briefs, in_chains, mem_tool_in, resolve};
+
+/// Search hits, each with what the graph says about it (#114): `warning` when
+/// something superseded, refuted or disputes the node, and `links` — how many
+/// edges `kaeru_neighbours` lists for it in this scope.
+fn hits_with_standing(store: &Store, hits: &[NodeBrief]) -> Value {
+    let ids: Vec<String> = hits.iter().map(|b| b.id.clone()).collect();
+    let marks = standing(store, &ids).unwrap_or_default();
+    Value::Array(
+        hits.iter()
+            .map(|b| {
+                let mut v = brief(b);
+                if let Some(s) = marks.get(&b.id) {
+                    if let Some(w) = s.warning() {
+                        v["warning"] = json!(w);
+                    }
+                    v["links"] = json!(s.links);
+                }
+                v
+            })
+            .collect(),
+    )
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RecallArgs {
@@ -79,8 +101,10 @@ mem_tool_in!(
     "kaeru_search",
     "Search long-term memory for what you've stored before (matches name + body; `word*` matches \
      by prefix). Returns name + short excerpt + id. Search before answering so you build on past \
-     work; `kaeru_at` reads a hit in full. Pass `initiative` to search one project; omit for your \
-     default — and note that a scoped search cannot see a sibling project's nodes.",
+     work; `kaeru_at` reads a hit in full. A hit with a `warning` was superseded, refuted or is \
+     disputed — read the node it names first; `links` > 0 means `kaeru_neighbours` has more. Pass \
+     `initiative` to search one project; omit for your default — and note that a scoped search \
+     cannot see a sibling project's nodes.",
     SearchArgs,
     { "type": "object", "properties": {
         "query": { "type": "string", "description": "search terms; `word*` matches by prefix" },
@@ -98,7 +122,7 @@ mem_tool_in!(
                     .unwrap_or_default()
             ),
         }),
-        Ok(hits) => json!({ "results": briefs(&hits) }),
+        Ok(hits) => json!({ "results": hits_with_standing(store, &hits) }),
         Err(e) => json!({ "error": e.to_string() }),
     }
 );

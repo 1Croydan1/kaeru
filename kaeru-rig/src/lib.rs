@@ -1053,6 +1053,42 @@ mod tests {
         serde_json::from_value(v).expect("args")
     }
 
+    /// A search hit that something superseded says so, and counts the links
+    /// `kaeru_neighbours` would show — the rig mirror of the daemon's mark (#114).
+    #[tokio::test]
+    async fn a_search_hit_carries_its_standing() {
+        let store = Arc::new(Store::open_in_memory().expect("open"));
+        let mem = KaeruMemory::with_initiative(store, "test-proj");
+        for (name, body) in [
+            ("router-plan-v1", "router plan, first take"),
+            ("router-plan-v2", "the router plan that replaced it"),
+        ] {
+            mem.episode()
+                .call(args(serde_json::json!({ "name": name, "body": body })))
+                .await
+                .unwrap();
+        }
+        mem.link()
+            .call(args(serde_json::json!({ "from": "router-plan-v2", "to": "router-plan-v1", "edge_type": "supersedes", "weight": 1.0 })))
+            .await
+            .unwrap();
+
+        let found = mem
+            .search()
+            .call(args(serde_json::json!({ "query": "router" })))
+            .await
+            .unwrap();
+        let hits = found["results"].as_array().unwrap();
+        let old = hits.iter().find(|r| r["name"] == "router-plan-v1").unwrap();
+        assert_eq!(old["warning"], "superseded by `router-plan-v2`", "{found}");
+        assert_eq!(old["links"], 1, "{found}");
+        let new = hits.iter().find(|r| r["name"] == "router-plan-v2").unwrap();
+        assert!(
+            new.get("warning").is_none(),
+            "the successor is current: {found}"
+        );
+    }
+
     /// Drives a representative slice of the full toolset through rig's
     /// `Tool::call` against an in-memory vault — capture, recall, read, link,
     /// chain, time-travel, and re-entry — end to end, no LLM involved.

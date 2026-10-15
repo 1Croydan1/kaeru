@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use kaeru_core::{
-    EdgeType, Error, Layer, Neighbour, NodeBrief, NodeId, Store, SummaryView, Tier,
+    EdgeType, Error, Layer, Neighbour, NodeBrief, NodeId, Standing, Store, SummaryView, Tier,
     count_nodes_in_initiative, edges_of, history,
 };
 use rmcp::ErrorData as McpError;
@@ -181,9 +181,9 @@ pub fn at_fulltext_hint(name: &str) -> String {
 pub const AT_FULLTEXT_HINT_MANY: &str = "\n↳ excerpts only — read one in full with `at <name>`.";
 
 /// `recall` returns just an opaque id; this reminds the agent it can now read
-/// the node — in full via `at`, or with its drill-down children via `drill`.
+/// the node — in full via `at`, or what it is linked to via `neighbours`.
 pub fn recall_read_hint(name: &str) -> String {
-    format!("\n↳ that's the id — read it: `at {name}` (full) or `drill {name}` (＋children).")
+    format!("\n↳ that's the id — read it: `at {name}` (full) or `neighbours {name}` (its links).")
 }
 
 /// Single-node reads point here once the node has actually changed.
@@ -207,11 +207,38 @@ pub fn history_read_version_hint(name: &str) -> String {
 // a pointer in the output of a verb the agent already calls, naming the read
 // verb that goes further. Hints, never gates.
 
-/// Footer for a `search` hit list: the two ways to go deeper on a result.
-/// Names the top hit so both are ready-to-run calls.
-pub fn search_deepen_hint(top: &str) -> String {
+/// `  ⚠ superseded by `x`` for a node the graph has ruled on or doubted, or
+/// `""` — the mark `awake` puts on a listed node, now on a search hit too.
+pub fn standing_mark(standing: Option<&Standing>) -> String {
+    standing
+        .and_then(Standing::warning)
+        .map(|w| format!("  ⚠ {w}"))
+        .unwrap_or_default()
+}
+
+/// Footer for a `search` hit list: the links of the best hit that has any.
+///
+/// It used to offer `drill` as "its neighbours" for the top hit, whatever the
+/// hit — but `drill` follows two edge types of twelve, and the hint was taken
+/// up about once in sixteen searches (#84, #114). It now names `neighbours`,
+/// the verb that sees every edge, only for a hit that has links to see, and
+/// says how many and why they matter at that moment. No linked hit, no
+/// footer: an island has nothing to show.
+pub fn search_links_hint(name: &str, links: usize) -> String {
+    let noun = if links == 1 { "link" } else { "links" };
     format!(
-        "\n↳ go deeper on a hit: `drill {top}` (its neighbours) · `trace {top}` (where it came from)."
+        "\n↳ before relying on `{name}`: `neighbours {name}` — its {links} {noun}, \
+         including anything that replaced or disputes it."
+    )
+}
+
+/// `drill` follows only `derived_from` / `part_of`, so a node held up by other
+/// edges drills to "(no drill-down children)" — read as "attached to nothing"
+/// (#84). When `neighbours` would show something, say so.
+pub fn drill_links_hint(name: &str, links: usize) -> String {
+    let noun = if links == 1 { "link" } else { "links" };
+    format!(
+        "\n↳ `drill` follows only derived_from / part_of — `neighbours {name}` shows its {links} {noun}."
     )
 }
 

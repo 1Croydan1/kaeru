@@ -2,16 +2,17 @@
 //! `ideas`, `outcomes`, `tagged`, `between`.
 
 use std::collections::BTreeMap;
+use std::slice::from_ref;
 
-use kaeru_core::Store;
+use kaeru_core::{FUZZY_RECALL_LIMIT_CAP, Store};
 use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 
 use crate::utils::{
-    AT_FULLTEXT_HINT_MANY, at_fulltext_hint, body_truncated, chain_membership_hint, history_hint,
-    name_not_found_message, parse_edge_types, recall_read_hint, render_briefs, render_neighbours,
-    render_summary, resolve_name_or_id, search_deepen_hint, search_empty_hint, text, to_mcp,
-    was_revised, with_initiative,
+    AT_FULLTEXT_HINT_MANY, at_fulltext_hint, body_truncated, chain_membership_hint,
+    drill_links_hint, history_hint, name_not_found_message, parse_edge_types, recall_read_hint,
+    render_briefs, render_neighbours, render_summary, resolve_name_or_id, search_empty_hint,
+    search_links_hint, standing_mark, text, to_mcp, was_revised, with_initiative,
 };
 
 pub fn recall(
@@ -51,6 +52,17 @@ pub fn drill(
                 .any(|c| body_truncated(c.brief.body_excerpt.as_deref()));
         if truncated {
             out.push_str(&at_fulltext_hint(&view.root.name));
+        }
+        // Nothing to drill is not nothing attached: name the verb that sees
+        // the other edge types, when there is something for it to see.
+        if view.children.is_empty() {
+            let links = kaeru_core::standing(store, from_ref(&id))
+                .ok()
+                .and_then(|s| s.get(&id).map(|s| s.links))
+                .unwrap_or(0);
+            if links > 0 {
+                out.push_str(&drill_links_hint(&view.root.name, links));
+            }
         }
         if was_revised(store, &id) {
             out.push_str(&history_hint(&view.root.name));
@@ -102,8 +114,14 @@ pub fn search(
     limit: usize,
     initiative: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    let hits = with_initiative(store, initiative, || {
-        kaeru_core::fuzzy_recall(store, query, limit).map_err(to_mcp)
+    let (hits, standing) = with_initiative(store, initiative, || {
+        let hits = kaeru_core::fuzzy_recall(store, query, limit).map_err(to_mcp)?;
+        // Read in the same scope as the hits, so a link count matches what
+        // `neighbours` will show there. Best-effort: a hit list without marks
+        // beats no hit list.
+        let ids: Vec<String> = hits.iter().map(|b| b.id.clone()).collect();
+        let standing = kaeru_core::standing(store, &ids).unwrap_or_default();
+        Ok((hits, standing))
     })?;
     if hits.is_empty() {
         return Ok(text(&search_miss(store, query, limit, initiative)));
@@ -111,7 +129,13 @@ pub fn search(
     let mut out = format!("matches ({}):\n", hits.len());
     let mut any_truncated = false;
     for b in &hits {
-        out.push_str(&format!("  - {} ({}) — {}\n", b.name, b.node_type, b.id));
+        out.push_str(&format!(
+            "  - {} ({}) — {}{}\n",
+            b.name,
+            b.node_type,
+            b.id,
+            standing_mark(standing.get(&b.id))
+        ));
         if let Some(e) = &b.body_excerpt {
             out.push_str(&format!("    {e}\n"));
             any_truncated |= body_truncated(Some(e));
@@ -120,8 +144,12 @@ pub fn search(
     if any_truncated {
         out.push_str(AT_FULLTEXT_HINT_MANY);
     }
-    if let Some(top) = hits.first() {
-        out.push_str(&search_deepen_hint(&top.name));
+    let linked = hits.iter().find_map(|b| {
+        let links = standing.get(&b.id).map_or(0, |s| s.links);
+        (links > 0).then_some((b, links))
+    });
+    if let Some((b, links)) = linked {
+        out.push_str(&search_links_hint(&b.name, links));
     }
     Ok(text(&out))
 }
@@ -173,14 +201,19 @@ fn search_miss(store: &Store, query: &str, limit: usize, initiative: Option<&str
         .map(|(name, n)| format!("{n} in `{name}`"))
         .collect::<Vec<_>>()
         .join(", ");
+    // The lookup is capped at `limit` like any search, so a full list is a
+    // floor, not a count (#113).
+    let count = if elsewhere.len() >= limit.min(FUZZY_RECALL_LIMIT_CAP) {
+        format!("{}+", elsewhere.len())
+    } else {
+        elsewhere.len().to_string()
+    };
     let top = &elsewhere[0];
     format!(
-        "(no matches) in `{scope}` — but {} match elsewhere: {spread}.\n\
+        "(no matches) in `{scope}` — but {count} match elsewhere: {spread}.\n\
          ↳ top hit: `{}` — read it with `at {}`. `search` without `initiative` lists them \
          all; if these are one project split across names, `merge_initiative` joins them.",
-        elsewhere.len(),
-        top.name,
-        top.name
+        top.name, top.name
     )
 }
 
@@ -322,6 +355,85 @@ mod tests {
         );
     }
 
+    /// #114: a superseded hit used to look exactly like a current one, and
+    /// the footer offered `drill` — blind to `supersedes` — as "its
+    /// neighbours". The hit now carries the verdict, and the footer names
+    /// `neighbours` for the best hit that has links.
+    #[test]
+    fn a_search_hit_says_what_replaced_or_disputes_it() {
+        let store = store_t();
+        let old = write(&store, "router-plan-v1", "router vpn plan, first take");
+        let new = write(&store, "router-plan-v2", "the plan that replaced it");
+        kaeru_core::link(&store, &new, &old, EdgeType::Supersedes).expect("link");
+        let fact = write(&store, "router-speed", "router vpn gives 90 mbit");
+        let doubt = write(&store, "speed-doubt", "measured 40 on wifi");
+        kaeru_core::link(&store, &doubt, &fact, EdgeType::Contradicts).expect("link");
+
+        let out = text_of(search(&store, "router", 10, Some("t")).unwrap());
+        assert!(
+            out.contains("router-plan-v1 (episode) — ")
+                && out.contains("⚠ superseded by `router-plan-v2`"),
+            "the stale hit is marked:\n{out}"
+        );
+        assert!(
+            out.contains("⚠ disputed by `speed-doubt`"),
+            "an open doubt is marked too:\n{out}"
+        );
+        assert!(
+            out.contains("`neighbours "),
+            "the footer names neighbours:\n{out}"
+        );
+        assert!(!out.contains("`drill "), "and no longer drill:\n{out}");
+    }
+
+    /// An island has nothing for `neighbours` to show, so no footer offers it.
+    #[test]
+    fn a_search_of_islands_offers_no_links_footer() {
+        let store = store_t();
+        write(&store, "lonely-note", "router vpn, nothing linked");
+        let out = text_of(search(&store, "router", 10, Some("t")).unwrap());
+        assert!(out.starts_with("matches (1)"), "{out}");
+        assert!(!out.contains("neighbours"), "{out}");
+        assert!(!out.contains('⚠'), "{out}");
+    }
+
+    /// The footer's count is what `neighbours` will list in the same scope.
+    #[test]
+    fn the_links_footer_counts_what_neighbours_shows() {
+        let store = store_t();
+        let hub = write(&store, "router-hub", "router notes hub");
+        for i in 0..2 {
+            let leaf = write(&store, &format!("leaf-{i}"), "unrelated text");
+            kaeru_core::link(&store, &leaf, &hub, EdgeType::RefersTo).expect("link");
+        }
+        let out = text_of(search(&store, "router", 10, Some("t")).unwrap());
+        assert!(
+            out.contains("`neighbours router-hub` — its 2 links"),
+            "{out}"
+        );
+        let ns = text_of(neighbours(&store, "router-hub", None, Some("t")).unwrap());
+        assert!(ns.starts_with("neighbours of router-hub (2)"), "{ns}");
+    }
+
+    /// An empty `drill` over a node held up by other edges points at the verb
+    /// that sees them, instead of reading as "attached to nothing" (#84).
+    #[test]
+    fn an_empty_drill_points_at_neighbours_when_there_are_links() {
+        let store = store_t();
+        let a = write(&store, "finding-a", "the first conclusion");
+        let b = write(&store, "finding-b", "the later one that overturns it");
+        kaeru_core::link(&store, &b, &a, EdgeType::Contradicts).expect("link");
+        let drilled = text_of(drill(&store, "finding-a", Some("t")).unwrap());
+        assert!(
+            drilled.contains("`neighbours finding-a` shows its 1 link"),
+            "{drilled}"
+        );
+
+        write(&store, "island", "nothing attached");
+        let lonely = text_of(drill(&store, "island", Some("t")).unwrap());
+        assert!(!lonely.contains("neighbours"), "{lonely}");
+    }
+
     #[test]
     fn neighbours_type_filter_rejects_an_unknown_type() {
         let store = store_t();
@@ -460,19 +572,6 @@ mod tests {
             "offers the prefix form of this very query: {out}"
         );
         assert!(out.contains("tagged topic:"), "and browsing by tag: {out}");
-    }
-
-    /// `search` returns excerpts; the two verbs that go further had no channel
-    /// anywhere in the agent's path, so the hit list names them.
-    #[test]
-    fn a_search_hit_points_at_drill_and_trace() {
-        let store = store_t();
-        write(&store, "alphahit", "alphaquery matters here");
-        let out = text_of(search(&store, "alphaquery", 10, Some("t")).unwrap());
-        assert!(
-            out.contains("`drill alphahit`") && out.contains("`trace alphahit`"),
-            "both deepen verbs, named on the top hit: {out}"
-        );
     }
 
     /// A node inside a saved trail has to say so — otherwise the trail is only
@@ -666,6 +765,20 @@ mod tests {
             out.contains("merge_initiative"),
             "and names the repair: {out}"
         );
+    }
+
+    /// The cross-initiative count rides the same capped search, so a list
+    /// that fills `limit` is a floor — it must not read as an exact count.
+    #[test]
+    fn a_capped_elsewhere_count_reads_as_a_floor() {
+        let store = Store::open_in_memory().expect("open");
+        for i in 0..3 {
+            write_in(&store, "busy", &format!("note-{i}"), "router vpn notes");
+        }
+        let out = text_of(search(&store, "router", 2, Some("quiet")).unwrap());
+        assert!(out.contains("2+ match elsewhere"), "{out}");
+        let exact = text_of(search(&store, "router", 10, Some("quiet")).unwrap());
+        assert!(exact.contains("3 match elsewhere"), "{exact}");
     }
 
     /// When the words match nowhere, it says so plainly — and still hands back

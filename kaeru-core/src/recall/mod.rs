@@ -62,7 +62,7 @@ pub use support::support_counts;
 pub use tagged::{tagged, tags_like};
 pub use under_review::under_review_pinned;
 pub use unversioned::{UNVERSIONED_OPS, UnversionedChange, unversioned_changes};
-pub use verdicts::{CANCELLING, VERDICT, Verdict, verdicts_against};
+pub use verdicts::{CANCELLING, Standing, VERDICT, Verdict, standing, verdicts_against};
 pub use walk::walk;
 
 /// Compact handle on a node — id, type, name, and a truncated body

@@ -51,8 +51,9 @@ All capture verbs take `layer` (default `warm`) and `visibility: shared` (captur
 | Verb | Does |
 |---|---|
 | `recall` | Exact name → id. |
-| `search` | Full-text fuzzy fallback when the exact name is forgotten. |
-| `drill` | A node plus its drill-down children (excerpts). |
+| `search` | Full-text fuzzy fallback when the exact name is forgotten. A hit the graph has ruled on carries `⚠ superseded by` / `refuted by` / `disputed by <node>`; an initiative-scoped search ranks inside the scope, not inside the global top `limit`. |
+| `drill` | A node plus its `derived_from` / `part_of` children (excerpts). |
+| `neighbours` | Every node one hop away, all edge types, both directions, each edge typed and directed. |
 | `trace` | Follow provenance (`derived_from`) back to sources. |
 | `between` | The edges linking two nodes, both directions. |
 | `tagged` | Read by tag, exact match. `topic:` tags are a node's most-mentioned words (a chosen name counts triple, compounds are also tagged by their parts). A miss returns the near tags that exist in scope rather than a bare empty list. |

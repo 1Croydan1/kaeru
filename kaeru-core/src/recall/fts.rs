@@ -21,6 +21,14 @@ use crate::store::Store;
 /// attention budget stays small.
 pub const FUZZY_RECALL_LIMIT_CAP: usize = 50;
 
+/// How deep a scoped search reads the ranked index (#113).
+///
+/// Cozo scores every match before it truncates to `k`, so `k` does not change
+/// what a search costs to rank — only how many matched rows it materialises.
+/// This bounds that list rather than leaving it open, because Cozo reserves
+/// `k` slots up front.
+const SCOPED_POOL: usize = 50_000;
+
 /// Searches the substrate for nodes whose `name` or `body` matches
 /// `query`. Returns at most `limit` briefs ordered by descending FTS
 /// score. `limit` is clamped to [`FUZZY_RECALL_LIMIT_CAP`].
@@ -56,7 +64,7 @@ pub fn fuzzy_recall(store: &Store, query: &str, limit: usize) -> Result<Vec<Node
     }
     let query = split_prefix_terms(query);
     let query = query.as_ref();
-    match run_fts(store, query, limit) {
+    match ranked(store, query, limit) {
         Ok(hits) => Ok(hits),
         // The FTS grammar rejects ordinary punctuation inside a token, and
         // kaeru's own naming convention is hyphenated slugs — so looking a node
@@ -71,9 +79,35 @@ pub fn fuzzy_recall(store: &Store, query: &str, limit: usize) -> Result<Vec<Node
             }
             // Report the ORIGINAL error if the rewrite fails too: it describes
             // what the caller actually typed.
-            run_fts(store, &safe, limit).map_err(|_| e)
+            ranked(store, &safe, limit).map_err(|_| e)
         }
     }
+}
+
+/// The top `limit` hits for `query`, ranked inside the active initiative when
+/// one is set.
+///
+/// The FTS atom truncates to `k` before the `node_initiative` join can see a
+/// row, so a scoped query with `k = limit` only ever filtered the global top
+/// `limit`: a term that is common in one initiative pushed every node of
+/// another past the cut, and that initiative's search came back short or
+/// empty (#113). The scope cannot move inside the atom — its `filter` sees
+/// only `node` columns, and membership lives in `node_initiative`.
+///
+/// So the depth is split from the output: a scoped search reads the whole
+/// match list ([`SCOPED_POOL`]) and keeps the top `limit` of what is in scope.
+/// It is one pass, not a cheap pass and a deep retry, because every FTS
+/// script pays a fixed price first — TF-IDF counts the whole `node` relation
+/// — and on a real vault that count costs more than materialising every
+/// match does.
+fn ranked(store: &Store, query: &str, limit: usize) -> Result<Vec<NodeBrief>> {
+    let limit = limit.min(FUZZY_RECALL_LIMIT_CAP);
+    let depth = if store.current_initiative().is_some() {
+        SCOPED_POOL
+    } else {
+        limit
+    };
+    run_fts(store, query, limit, depth)
 }
 
 /// Rewrites a query the FTS grammar would reject into one it accepts: any token
@@ -255,9 +289,9 @@ pub fn prefix_widening(query: &str) -> Option<String> {
     Some(widened.join(" "))
 }
 
-/// One FTS attempt with `query` exactly as given.
-fn run_fts(store: &Store, query: &str, limit: usize) -> Result<Vec<NodeBrief>> {
-    let limit = limit.min(FUZZY_RECALL_LIMIT_CAP);
+/// One FTS attempt with `query` exactly as given, reading `depth` hits deep
+/// into each index and returning at most `limit` of them.
+fn run_fts(store: &Store, query: &str, limit: usize, depth: usize) -> Result<Vec<NodeBrief>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -270,15 +304,16 @@ fn run_fts(store: &Store, query: &str, limit: usize) -> Result<Vec<NodeBrief>> {
     // inline `k` into the script and pass `q` as a Datalog parameter so
     // user input never reaches the script source.
     //
-    // Initiative-scoped: an extra `*node_initiative` join trims hits.
+    // Initiative-scoped: an extra `*node_initiative` join trims hits — after
+    // the atom has cut to `k`, which is why `depth` can exceed `limit`.
     // Cross-initiative: just a NOW anchor on the base relation.
     let script = match store.current_initiative() {
         Some(init) => {
             params.insert("init".to_string(), DataValue::Str(init.into()));
             format!(
                 r#"
-                hits[id, score] := ~node:fts_name{{id | query: $q, k: {limit}, bind_score: score}}
-                hits[id, score] := ~node:fts_body{{id | query: $q, k: {limit}, bind_score: score}}
+                hits[id, score] := ~node:fts_name{{id | query: $q, k: {depth}, bind_score: score}}
+                hits[id, score] := ~node:fts_body{{id | query: $q, k: {depth}, bind_score: score}}
 
                 ?[id, type, name, body, score, validity] :=
                     hits[id, score],
@@ -291,8 +326,8 @@ fn run_fts(store: &Store, query: &str, limit: usize) -> Result<Vec<NodeBrief>> {
         }
         None => format!(
             r#"
-            hits[id, score] := ~node:fts_name{{id | query: $q, k: {limit}, bind_score: score}}
-            hits[id, score] := ~node:fts_body{{id | query: $q, k: {limit}, bind_score: score}}
+            hits[id, score] := ~node:fts_name{{id | query: $q, k: {depth}, bind_score: score}}
+            hits[id, score] := ~node:fts_body{{id | query: $q, k: {depth}, bind_score: score}}
 
             ?[id, type, name, body, score, validity] :=
                 hits[id, score],
@@ -457,6 +492,44 @@ mod tests {
         assert_eq!(prefix_widening("\"a b\" c").as_deref(), Some("\"a b\" c*"));
         assert_eq!(prefix_widening("a* b*"), None);
         assert_eq!(prefix_widening("pilot-finalize"), None);
+    }
+
+    /// A scoped search filtered the global top-`limit` instead of ranking
+    /// inside the scope (#113): a term that is common in a busy initiative
+    /// pushed every node of a quiet one past `k`, and the quiet initiative's
+    /// search came back empty while its node was right there.
+    #[test]
+    fn a_scoped_search_is_not_crowded_out_by_another_initiative() {
+        let store = Store::open_in_memory().expect("open");
+        store.use_initiative("busy");
+        for i in 0..12 {
+            write_episode(
+                &store,
+                EpisodeKind::Observation,
+                Significance::Low,
+                &format!("alpha-note-{i}"),
+                "alpha alpha alpha",
+            )
+            .expect("write");
+        }
+        store.use_initiative("quiet");
+        write_episode(
+            &store,
+            EpisodeKind::Observation,
+            Significance::Low,
+            "quiet-design",
+            "a long design note that mentions alpha once among many other words \
+             about storage, layers, edges and the shape of the graph",
+        )
+        .expect("write");
+
+        let hits = fuzzy_recall(&store, "alpha", 3).expect("search");
+        let names: Vec<&str> = hits.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["quiet-design"], "scoped to `quiet`: {names:?}");
+
+        // The busy scope still gets its own top `limit`, unchanged.
+        store.use_initiative("busy");
+        assert_eq!(fuzzy_recall(&store, "alpha", 3).expect("search").len(), 3);
     }
 
     fn seeded() -> Store {
